@@ -20,6 +20,6 @@ COPY . .
 EXPOSE 9100
 
 HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-  CMD wget -q --spider http://localhost:9100/health || exit 1
+  CMD wget -q --spider http://127.0.0.1:9100/health || exit 1
 
 CMD ["php", "-S", "0.0.0.0:9100", "server.php"]
