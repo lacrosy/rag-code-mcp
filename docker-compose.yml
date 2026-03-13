@@ -1,8 +1,8 @@
-# Ragcode infrastructure: Qdrant (vector DB) + Ollama (embeddings/LLM)
+# Ragcode infrastructure: Qdrant (vector DB) + Ollama (embeddings/LLM) + PHP Bridge (parser)
 # Used by `ragcode install` and can be started standalone.
 #
 # Usage:
-#   docker compose up -d          # start Qdrant + Ollama
+#   RAGCODE_PROJECT_DIR=/path/to/project docker compose up -d
 #   docker compose down            # stop
 #   docker compose down -v         # stop + wipe data
 
@@ -26,6 +26,21 @@ services:
       - "${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama_data:/root/.ollama
+
+  php-bridge:
+    build:
+      context: ./php-bridge
+      dockerfile: Dockerfile
+    image: ragcode-php-bridge:latest
+    ports:
+      - "${PHP_BRIDGE_PORT:-9100}:9100"
+    volumes:
+      - "${RAGCODE_PROJECT_DIR:-.}:/workspace:ro"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9100/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
 volumes:
   qdrant_data:

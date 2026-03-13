@@ -4,20 +4,35 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/doITmagic/rag-code-mcp/internal/codetypes"
 )
 
-// BridgeAnalyzer implements codetypes.PathAnalyzer using nikic/php-parser via PHP CLI bridge.
-type BridgeAnalyzer struct{}
+// BridgeAnalyzer implements codetypes.PathAnalyzer using nikic/php-parser.
+// Supports two modes:
+//   - HTTP mode: if RAGCODE_PHP_BRIDGE_URL is set (e.g. http://localhost:9100), sends POST /parse
+//   - CLI mode:  if RAGCODE_PHP_BRIDGE is set or parse.php found, runs `php parse.php --batch`
+type BridgeAnalyzer struct {
+	httpURL string // empty = CLI mode
+	client  *http.Client
+}
 
 // NewBridgeAnalyzer creates a new PHP bridge analyzer.
+// Auto-detects HTTP vs CLI mode from environment.
 func NewBridgeAnalyzer() *BridgeAnalyzer {
-	return &BridgeAnalyzer{}
+	ba := &BridgeAnalyzer{}
+	if url := os.Getenv("RAGCODE_PHP_BRIDGE_URL"); url != "" {
+		ba.httpURL = strings.TrimRight(url, "/")
+		ba.client = &http.Client{Timeout: 120 * time.Second}
+	}
+	return ba
 }
 
 // bridgeSymbol represents a symbol returned by the PHP bridge JSON output.
@@ -60,11 +75,6 @@ type bridgeParam struct {
 
 // AnalyzePaths implements the PathAnalyzer interface.
 func (ba *BridgeAnalyzer) AnalyzePaths(paths []string) ([]codetypes.CodeChunk, error) {
-	bridgePath, err := findBridgePath()
-	if err != nil {
-		return nil, err
-	}
-
 	// Collect all PHP files from paths
 	var phpFiles []string
 	for _, p := range paths {
@@ -89,13 +99,82 @@ func (ba *BridgeAnalyzer) AnalyzePaths(paths []string) ([]codetypes.CodeChunk, e
 		return nil, nil
 	}
 
-	// Run PHP bridge in batch mode
-	symbols, err := runBridge(bridgePath, phpFiles)
+	// Route to HTTP or CLI mode
+	var symbols []bridgeSymbol
+	var err error
+
+	if ba.httpURL != "" {
+		symbols, err = ba.runBridgeHTTP(phpFiles)
+	} else {
+		bridgePath, pathErr := findBridgePath()
+		if pathErr != nil {
+			return nil, pathErr
+		}
+		symbols, err = runBridge(bridgePath, phpFiles)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("PHP bridge failed: %w", err)
 	}
 
 	return convertBridgeSymbolsToChunks(symbols), nil
+}
+
+// bridgeHTTPResponse is the JSON response from the PHP bridge HTTP server.
+type bridgeHTTPResponse struct {
+	Symbols []bridgeSymbol `json:"symbols"`
+	Errors  []string       `json:"errors,omitempty"`
+}
+
+// runBridgeHTTP sends files to the PHP bridge HTTP server for parsing.
+func (ba *BridgeAnalyzer) runBridgeHTTP(files []string) ([]bridgeSymbol, error) {
+	// Process in batches of 100 to avoid huge requests
+	const batchSize = 100
+	var allSymbols []bridgeSymbol
+
+	for i := 0; i < len(files); i += batchSize {
+		end := i + batchSize
+		if end > len(files) {
+			end = len(files)
+		}
+		batch := files[i:end]
+
+		reqBody, err := json.Marshal(map[string][]string{"files": batch})
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request: %w", err)
+		}
+
+		resp, err := ba.client.Post(ba.httpURL+"/parse", "application/json", bytes.NewReader(reqBody))
+		if err != nil {
+			return nil, fmt.Errorf("HTTP request to PHP bridge failed: %w", err)
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("PHP bridge HTTP returned %d: %s", resp.StatusCode, truncate(string(body), 500))
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+
+		var result bridgeHTTPResponse
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("failed to parse PHP bridge HTTP response: %w\noutput (first 500 bytes): %s",
+				err, truncate(string(body), 500))
+		}
+
+		// Log errors from bridge
+		for _, e := range result.Errors {
+			fmt.Fprintf(os.Stderr, "PHP bridge warning: %s\n", e)
+		}
+
+		allSymbols = append(allSymbols, result.Symbols...)
+	}
+
+	return allSymbols, nil
 }
 
 // findBridgePath locates the parse.php bridge script.

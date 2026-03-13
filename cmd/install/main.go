@@ -31,13 +31,15 @@ var (
 
 // Constants
 const (
-	ollamaImage     = "ollama/ollama:latest"
-	qdrantImage     = "qdrant/qdrant:latest"
-	ollamaContainer = "ragcode-ollama"
-	qdrantContainer = "ragcode-qdrant"
-	defaultModel    = "phi3:medium"
-	defaultEmbed    = "nomic-embed-text"
-	repoURL         = "https://github.com/lacrosy/rag-code-mcp"
+	ollamaImage         = "ollama/ollama:latest"
+	qdrantImage         = "qdrant/qdrant:latest"
+	phpBridgeImage      = "ragcode-php-bridge:latest"
+	ollamaContainer     = "ragcode-ollama"
+	qdrantContainer     = "ragcode-qdrant"
+	phpBridgeContainer  = "ragcode-php-bridge"
+	defaultModel        = "phi3:medium"
+	defaultEmbed        = "nomic-embed-text"
+	repoURL             = "https://github.com/lacrosy/rag-code-mcp"
 )
 
 // Colors
@@ -412,6 +414,39 @@ func setupServices() {
 		startDockerContainer(ollamaContainer, ollamaImage, args, nil)
 	}
 
+	// PHP Bridge — if no local PHP, start container
+	phpBridgeReady := false
+	if resp, err := client.Get("http://127.0.0.1:9100/health"); err == nil {
+		resp.Body.Close()
+		phpBridgeReady = true
+		success("PHP bridge already running on port 9100")
+	}
+	if !phpBridgeReady {
+		if commandExists("php") && commandExists("composer") {
+			success("PHP + Composer available locally (CLI mode)")
+		} else {
+			// Need Docker container for PHP bridge
+			log("PHP/Composer not found locally. Starting PHP bridge container...")
+			dir := resolveInstallDir()
+			bridgeDir := filepath.Join(dir, "php-bridge")
+			if _, err := os.Stat(filepath.Join(bridgeDir, "Dockerfile")); err == nil {
+				// Build image from local Dockerfile
+				buildCmd := exec.Command("docker", "build", "-t", phpBridgeImage, bridgeDir)
+				buildCmd.Stdout = os.Stdout
+				buildCmd.Stderr = os.Stderr
+				if err := buildCmd.Run(); err != nil {
+					warn(fmt.Sprintf("Failed to build PHP bridge image: %v", err))
+				} else {
+					projectDir, _ := os.Getwd()
+					startDockerContainer(phpBridgeContainer, phpBridgeImage,
+						[]string{"-p", "9100:9100", "-v", projectDir + ":/workspace:ro"}, nil)
+				}
+			} else {
+				warn("PHP bridge Dockerfile not found. Either install PHP 8.1+ or provide php-bridge/Dockerfile")
+			}
+		}
+	}
+
 	waitForService("Ollama", "http://localhost:11434")
 	waitForService("Qdrant", "http://localhost:6333/readyz")
 }
@@ -687,12 +722,17 @@ func updateMCPConfig(ideKey, displayName, path, binPath, configPath, bridgePath 
 		delete(servers, lk)
 	}
 
+	env := map[string]string{
+		"RAGCODE_PHP_BRIDGE": bridgePath,
+	}
+	// If PHP is not available locally, assume Docker bridge on port 9100
+	if !commandExists("php") {
+		env["RAGCODE_PHP_BRIDGE_URL"] = "http://localhost:9100"
+	}
 	entry := map[string]interface{}{
 		"command": binPath,
 		"args":    []string{"-config", configPath},
-		"env": map[string]string{
-			"RAGCODE_PHP_BRIDGE": bridgePath,
-		},
+		"env":     env,
 	}
 
 	if ideKey == "vs-code" || ideKey == "copilot" {
@@ -749,8 +789,8 @@ func runUninstall(dir string) {
 
 	// Stop Docker containers
 	if commandExists("docker") {
-		_ = exec.Command("docker", "stop", ollamaContainer, qdrantContainer).Run()
-		_ = exec.Command("docker", "rm", ollamaContainer, qdrantContainer).Run()
+		_ = exec.Command("docker", "stop", ollamaContainer, qdrantContainer, phpBridgeContainer).Run()
+		_ = exec.Command("docker", "rm", ollamaContainer, qdrantContainer, phpBridgeContainer).Run()
 		success("Docker containers removed")
 	}
 
@@ -832,6 +872,9 @@ func freeRequiredPorts() {
 	}
 	if *qdrantMode == "docker" {
 		ports[6333] = "Qdrant"
+	}
+	if !commandExists("php") {
+		ports[9100] = "PHP Bridge"
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -922,10 +965,15 @@ func printSummary(dir string) {
 	fmt.Printf("  Directory:  %s\n", dir)
 	fmt.Printf("  Binary:     %s\n", binPath)
 	fmt.Printf("  Config:     %s\n", configPath)
-	fmt.Printf("  PHP Bridge: %s\n", bridgePath)
+	if commandExists("php") {
+		fmt.Printf("  PHP Bridge: %s (CLI mode)\n", bridgePath)
+	} else {
+		fmt.Printf("  PHP Bridge: http://localhost:9100 (Docker mode)\n")
+	}
 	fmt.Println()
 	fmt.Println("MCP server entry for .mcp.json:")
-	fmt.Printf(`  {
+	if commandExists("php") {
+		fmt.Printf(`  {
     "ragcode": {
       "command": "%s",
       "args": ["-config", "%s"],
@@ -933,6 +981,16 @@ func printSummary(dir string) {
     }
   }
 `, binPath, configPath, bridgePath)
+	} else {
+		fmt.Printf(`  {
+    "ragcode": {
+      "command": "%s",
+      "args": ["-config", "%s"],
+      "env": { "RAGCODE_PHP_BRIDGE_URL": "http://localhost:9100" }
+    }
+  }
+`, binPath, configPath)
+	}
 	fmt.Println()
 	fmt.Println("Next: open your IDE and ask AI to index_workspace.")
 }
