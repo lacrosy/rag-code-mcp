@@ -268,9 +268,10 @@ type MCPTool interface {
 
 // SearchCodeInput defines the typed input for the search_code tool.
 type SearchCodeInput struct {
-	Query    string `json:"query"`
-	Limit    int    `json:"limit,omitempty"`
-	FilePath string `json:"file_path,omitempty"`
+	Query          string            `json:"query"`
+	Limit          int               `json:"limit,omitempty"`
+	FilePath       string            `json:"file_path,omitempty"`
+	MetadataFilter map[string]string `json:"metadata_filter,omitempty"`
 }
 
 // SearchCodeOutput defines the typed output for the search_code tool.
@@ -590,6 +591,30 @@ func main() {
 
 	indexWorkspaceTool := tools.NewIndexWorkspaceTool(workspaceManager)
 
+	searchByMetadataTool := tools.NewSearchByMetadataTool(nil)
+	searchByMetadataTool.SetWorkspaceManager(workspaceManager)
+
+	listMetadataValuesTool := tools.NewListMetadataValuesTool(nil)
+	listMetadataValuesTool.SetWorkspaceManager(workspaceManager)
+
+	getWorkspaceStatsTool := tools.NewGetWorkspaceStatsTool(nil)
+	getWorkspaceStatsTool.SetWorkspaceManager(workspaceManager)
+
+	getClassHierarchyTool := tools.NewGetClassHierarchyTool(nil)
+	getClassHierarchyTool.SetWorkspaceManager(workspaceManager)
+
+	findBySignatureTool := tools.NewFindBySignatureTool(nil)
+	findBySignatureTool.SetWorkspaceManager(workspaceManager)
+
+	compareClassesTool := tools.NewCompareClassesTool(nil)
+	compareClassesTool.SetWorkspaceManager(workspaceManager)
+
+	getCallGraphTool := tools.NewGetCallGraphTool(nil, ollamaProvider)
+	getCallGraphTool.SetWorkspaceManager(workspaceManager)
+
+	batchSearchTool := tools.NewBatchSearchTool(nil, ollamaProvider)
+	batchSearchTool.SetWorkspaceManager(workspaceManager)
+
 	// Example: use typed ToolHandlerFor for search_code
 	registerSearchCodeToolTyped(server, searchTool, cfg)
 
@@ -602,6 +627,14 @@ func main() {
 	registerAgentTool(server, searchDocsTool, cfg)
 	registerAgentTool(server, hybridTool, cfg)
 	registerAgentTool(server, indexWorkspaceTool, cfg)
+	registerAgentTool(server, searchByMetadataTool, cfg)
+	registerAgentTool(server, listMetadataValuesTool, cfg)
+	registerAgentTool(server, getWorkspaceStatsTool, cfg)
+	registerAgentTool(server, getClassHierarchyTool, cfg)
+	registerAgentTool(server, findBySignatureTool, cfg)
+	registerAgentTool(server, compareClassesTool, cfg)
+	registerAgentTool(server, getCallGraphTool, cfg)
+	registerAgentTool(server, batchSearchTool, cfg)
 
 	if err := registerFileResources(server); err != nil {
 		log.Fatalf("Failed to register resources: %v", err)
@@ -635,6 +668,14 @@ func registerSearchCodeToolTyped(server *mcp.Server, tool *tools.SearchLocalInde
 		}
 		if input.FilePath != "" {
 			args["file_path"] = input.FilePath
+		}
+		if len(input.MetadataFilter) > 0 {
+			// Convert map[string]string to map[string]interface{} for extractMetadataFilter
+			mf := make(map[string]interface{}, len(input.MetadataFilter))
+			for k, v := range input.MetadataFilter {
+				mf[k] = v
+			}
+			args["metadata_filter"] = mf
 		}
 
 		start := time.Now()
@@ -860,6 +901,10 @@ func getToolSchema(toolName string) map[string]interface{} {
 					"type":        "number",
 					"description": "Maximum number of results to return (default: 5)",
 				},
+				"metadata_filter": map[string]interface{}{
+					"type":        "object",
+					"description": "Optional: filter results by exact metadata field values. Keys are metadata field names, values are exact match strings. Example: {\"pspi_provider\": \"rapyd\", \"pspi_role\": \"payment_flow\"}",
+				},
 			},
 			"required": []string{"query"},
 		}
@@ -1028,8 +1073,186 @@ func getToolSchema(toolName string) map[string]interface{} {
 					"type":        "number",
 					"description": "Maximum number of results to return (default: 5)",
 				},
+				"metadata_filter": map[string]interface{}{
+					"type":        "object",
+					"description": "Optional: filter results by exact metadata field values. Keys are metadata field names, values are exact match strings. Example: {\"pspi_provider\": \"rapyd\", \"pspi_role\": \"payment_flow\"}",
+				},
 			},
 			"required": []string{"query"},
+		}
+
+	case "search_by_metadata":
+		return map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"metadata_filter": map[string]interface{}{
+					"type":        "object",
+					"description": "Filter by exact metadata field values. Keys are metadata field names, values are exact match strings. Example: {\"pspi_role\": \"payment_flow\"}, {\"pspi_provider\": \"rapyd\"}, {\"type\": \"class\"}",
+				},
+				"file_path": map[string]interface{}{
+					"type":        "string",
+					"description": "File path to detect workspace context (required)",
+				},
+				"limit": map[string]interface{}{
+					"type":        "number",
+					"description": "Maximum number of results to return (default: 50)",
+				},
+				"output_format": map[string]interface{}{
+					"type":        "string",
+					"description": "Output format: 'json' (default) or 'markdown'",
+				},
+			},
+			"required": []string{"metadata_filter", "file_path"},
+		}
+
+	case "list_metadata_values":
+		return map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"key": map[string]interface{}{
+					"type":        "string",
+					"description": "The metadata field name to list unique values for. Examples: 'pspi_role', 'pspi_provider', 'pspi_component_type', 'type', 'package'",
+				},
+				"file_path": map[string]interface{}{
+					"type":        "string",
+					"description": "File path to detect workspace context (required)",
+				},
+				"metadata_filter": map[string]interface{}{
+					"type":        "object",
+					"description": "Optional: pre-filter before aggregating. Example: {\"pspi_provider\": \"rapyd\"} to see roles only for Rapyd",
+				},
+			},
+			"required": []string{"key", "file_path"},
+		}
+
+	case "get_workspace_stats":
+		return map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"file_path": map[string]interface{}{
+					"type":        "string",
+					"description": "File path to detect workspace context (required)",
+				},
+			},
+			"required": []string{"file_path"},
+		}
+
+	case "get_class_hierarchy":
+		return map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"class_name": map[string]interface{}{
+					"type":        "string",
+					"description": "The class/interface name to show hierarchy for",
+				},
+				"file_path": map[string]interface{}{
+					"type":        "string",
+					"description": "File path to detect workspace context (required)",
+				},
+			},
+			"required": []string{"class_name", "file_path"},
+		}
+
+	case "find_by_signature":
+		return map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"return_type": map[string]interface{}{
+					"type":        "string",
+					"description": "Find functions/methods returning this type (e.g., 'PaymentResponse', 'array', 'bool')",
+				},
+				"param_type": map[string]interface{}{
+					"type":        "string",
+					"description": "Find functions/methods accepting this parameter type (e.g., 'Request', 'ProviderRequestInterface')",
+				},
+				"pattern": map[string]interface{}{
+					"type":        "string",
+					"description": "Find functions/methods with this substring in their signature",
+				},
+				"file_path": map[string]interface{}{
+					"type":        "string",
+					"description": "File path to detect workspace context (required)",
+				},
+				"limit": map[string]interface{}{
+					"type":        "number",
+					"description": "Maximum number of results (default: 50)",
+				},
+			},
+			"required": []string{"file_path"},
+		}
+
+	case "compare_classes":
+		return map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"class_a": map[string]interface{}{
+					"type":        "string",
+					"description": "First class name to compare",
+				},
+				"class_b": map[string]interface{}{
+					"type":        "string",
+					"description": "Second class name to compare",
+				},
+				"file_path": map[string]interface{}{
+					"type":        "string",
+					"description": "File path to detect workspace context (required)",
+				},
+			},
+			"required": []string{"class_a", "class_b", "file_path"},
+		}
+
+	case "get_call_graph":
+		return map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"symbol_name": map[string]interface{}{
+					"type":        "string",
+					"description": "The function or method name to analyze",
+				},
+				"file_path": map[string]interface{}{
+					"type":        "string",
+					"description": "File path to detect workspace context (required)",
+				},
+				"depth": map[string]interface{}{
+					"type":        "number",
+					"description": "Analysis depth: 1 (direct callers/callees, default) or 2 (includes transitive)",
+				},
+			},
+			"required": []string{"symbol_name", "file_path"},
+		}
+
+	case "batch_search":
+		return map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"queries": map[string]interface{}{
+					"type":        "array",
+					"description": "Array of search queries. Each item: {\"query\": \"...\", \"metadata_filter\": {...}, \"limit\": N}",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"query": map[string]interface{}{
+								"type":        "string",
+								"description": "The search query",
+							},
+							"metadata_filter": map[string]interface{}{
+								"type":        "object",
+								"description": "Optional metadata filter for this query",
+							},
+							"limit": map[string]interface{}{
+								"type":        "number",
+								"description": "Max results for this query (default: 3)",
+							},
+						},
+						"required": []string{"query"},
+					},
+				},
+				"file_path": map[string]interface{}{
+					"type":        "string",
+					"description": "File path to detect workspace context (required)",
+				},
+			},
+			"required": []string{"queries", "file_path"},
 		}
 
 	default:
