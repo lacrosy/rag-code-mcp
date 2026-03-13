@@ -16,23 +16,30 @@ import (
 )
 
 // BridgeAnalyzer implements codetypes.PathAnalyzer using nikic/php-parser.
-// Supports two modes:
-//   - HTTP mode: if RAGCODE_PHP_BRIDGE_URL is set (e.g. http://localhost:9100), sends POST /parse
-//   - CLI mode:  if RAGCODE_PHP_BRIDGE is set or parse.php found, runs `php parse.php --batch`
+// Default: HTTP mode via Docker container (RAGCODE_PHP_BRIDGE_URL, default http://localhost:9100).
+// Fallback: CLI mode if RAGCODE_PHP_BRIDGE is explicitly set to a parse.php path.
 type BridgeAnalyzer struct {
-	httpURL string // empty = CLI mode
+	httpURL string
 	client  *http.Client
 }
 
 // NewBridgeAnalyzer creates a new PHP bridge analyzer.
-// Auto-detects HTTP vs CLI mode from environment.
+// Default: Docker HTTP mode on localhost:9100.
+// Override: set RAGCODE_PHP_BRIDGE=/path/to/parse.php for CLI mode.
 func NewBridgeAnalyzer() *BridgeAnalyzer {
-	ba := &BridgeAnalyzer{}
-	if url := os.Getenv("RAGCODE_PHP_BRIDGE_URL"); url != "" {
-		ba.httpURL = strings.TrimRight(url, "/")
-		ba.client = &http.Client{Timeout: 120 * time.Second}
+	// CLI mode override
+	if bridgePath := os.Getenv("RAGCODE_PHP_BRIDGE"); bridgePath != "" {
+		return &BridgeAnalyzer{}
 	}
-	return ba
+	// Default: Docker HTTP mode
+	url := os.Getenv("RAGCODE_PHP_BRIDGE_URL")
+	if url == "" {
+		url = "http://localhost:9100"
+	}
+	return &BridgeAnalyzer{
+		httpURL: strings.TrimRight(url, "/"),
+		client:  &http.Client{Timeout: 120 * time.Second},
+	}
 }
 
 // bridgeSymbol represents a symbol returned by the PHP bridge JSON output.

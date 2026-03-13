@@ -260,7 +260,7 @@ func downloadRelease(binDir string) bool {
 func installPHPBridge(dir string) {
 	bridgeDir := filepath.Join(dir, "php-bridge")
 
-	// Check if source php-bridge/ exists (running from source tree)
+	// Check if source php-bridge/ exists (running from source tree or extracted release)
 	if _, err := os.Stat("php-bridge/parse.php"); err == nil {
 		log("Installing PHP bridge from source tree...")
 		if err := os.RemoveAll(bridgeDir); err != nil && !os.IsNotExist(err) {
@@ -298,28 +298,8 @@ func installPHPBridge(dir string) {
 		log("PHP bridge already exists, skipping copy.")
 	}
 
-	// Run composer install
-	if !commandExists("composer") {
-		warn("Composer not found. Install it: https://getcomposer.org/download/")
-		warn("Then run: cd " + bridgeDir + " && composer install --no-dev")
-		return
-	}
-	if !commandExists("php") {
-		warn("PHP CLI not found. Install PHP 8.1+.")
-		warn("Then run: cd " + bridgeDir + " && composer install --no-dev")
-		return
-	}
-
-	log("Running composer install...")
-	cmd := exec.Command("composer", "install", "--no-dev", "--optimize-autoloader", "--quiet")
-	cmd.Dir = bridgeDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		warn(fmt.Sprintf("Composer install failed: %v. Run manually: cd %s && composer install --no-dev", err, bridgeDir))
-		return
-	}
-	success("PHP bridge installed (nikic/php-parser)")
+	// Composer install runs inside Docker container — no local PHP/Composer needed.
+	success("PHP bridge files installed (Docker will handle dependencies)")
 }
 
 // ─── Step 3: Config ────────────────────────────────────────────────────────────
@@ -414,7 +394,7 @@ func setupServices() {
 		startDockerContainer(ollamaContainer, ollamaImage, args, nil)
 	}
 
-	// PHP Bridge — if no local PHP, start container
+	// PHP Bridge container (always Docker)
 	phpBridgeReady := false
 	if resp, err := client.Get("http://127.0.0.1:9100/health"); err == nil {
 		resp.Body.Close()
@@ -422,28 +402,21 @@ func setupServices() {
 		success("PHP bridge already running on port 9100")
 	}
 	if !phpBridgeReady {
-		if commandExists("php") && commandExists("composer") {
-			success("PHP + Composer available locally (CLI mode)")
-		} else {
-			// Need Docker container for PHP bridge
-			log("PHP/Composer not found locally. Starting PHP bridge container...")
-			dir := resolveInstallDir()
-			bridgeDir := filepath.Join(dir, "php-bridge")
-			if _, err := os.Stat(filepath.Join(bridgeDir, "Dockerfile")); err == nil {
-				// Build image from local Dockerfile
-				buildCmd := exec.Command("docker", "build", "-t", phpBridgeImage, bridgeDir)
-				buildCmd.Stdout = os.Stdout
-				buildCmd.Stderr = os.Stderr
-				if err := buildCmd.Run(); err != nil {
-					warn(fmt.Sprintf("Failed to build PHP bridge image: %v", err))
-				} else {
-					projectDir, _ := os.Getwd()
-					startDockerContainer(phpBridgeContainer, phpBridgeImage,
-						[]string{"-p", "9100:9100", "-v", projectDir + ":/workspace:ro"}, nil)
-				}
-			} else {
-				warn("PHP bridge Dockerfile not found. Either install PHP 8.1+ or provide php-bridge/Dockerfile")
+		dir := resolveInstallDir()
+		bridgeDir := filepath.Join(dir, "php-bridge")
+		if _, err := os.Stat(filepath.Join(bridgeDir, "Dockerfile")); err == nil {
+			log("Building PHP bridge Docker image...")
+			buildCmd := exec.Command("docker", "build", "-t", phpBridgeImage, bridgeDir)
+			buildCmd.Stdout = os.Stdout
+			buildCmd.Stderr = os.Stderr
+			if err := buildCmd.Run(); err != nil {
+				fail(fmt.Sprintf("Failed to build PHP bridge image: %v", err))
 			}
+			projectDir, _ := os.Getwd()
+			startDockerContainer(phpBridgeContainer, phpBridgeImage,
+				[]string{"-p", "9100:9100", "-v", projectDir + ":/workspace:ro"}, nil)
+		} else {
+			fail("PHP bridge Dockerfile not found in " + bridgeDir)
 		}
 	}
 
@@ -722,17 +695,12 @@ func updateMCPConfig(ideKey, displayName, path, binPath, configPath, bridgePath 
 		delete(servers, lk)
 	}
 
-	env := map[string]string{
-		"RAGCODE_PHP_BRIDGE": bridgePath,
-	}
-	// If PHP is not available locally, assume Docker bridge on port 9100
-	if !commandExists("php") {
-		env["RAGCODE_PHP_BRIDGE_URL"] = "http://localhost:9100"
-	}
 	entry := map[string]interface{}{
 		"command": binPath,
 		"args":    []string{"-config", configPath},
-		"env":     env,
+		"env": map[string]string{
+			"RAGCODE_PHP_BRIDGE_URL": "http://localhost:9100",
+		},
 	}
 
 	if ideKey == "vs-code" || ideKey == "copilot" {
@@ -873,9 +841,7 @@ func freeRequiredPorts() {
 	if *qdrantMode == "docker" {
 		ports[6333] = "Qdrant"
 	}
-	if !commandExists("php") {
-		ports[9100] = "PHP Bridge"
-	}
+	ports[9100] = "PHP Bridge"
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	for port, name := range ports {
@@ -958,31 +924,16 @@ func printBanner() {
 func printSummary(dir string) {
 	binPath := filepath.Join(dir, "bin", "rag-code-mcp")
 	configPath := filepath.Join(dir, "config.yaml")
-	bridgePath := filepath.Join(dir, "php-bridge", "parse.php")
 
 	fmt.Printf("\n%sInstallation Complete!%s\n", green, reset)
 	fmt.Println("────────────────────────────────────────────")
 	fmt.Printf("  Directory:  %s\n", dir)
 	fmt.Printf("  Binary:     %s\n", binPath)
 	fmt.Printf("  Config:     %s\n", configPath)
-	if commandExists("php") {
-		fmt.Printf("  PHP Bridge: %s (CLI mode)\n", bridgePath)
-	} else {
-		fmt.Printf("  PHP Bridge: http://localhost:9100 (Docker mode)\n")
-	}
+	fmt.Printf("  PHP Bridge: http://localhost:9100 (Docker)\n")
 	fmt.Println()
 	fmt.Println("MCP server entry for .mcp.json:")
-	if commandExists("php") {
-		fmt.Printf(`  {
-    "ragcode": {
-      "command": "%s",
-      "args": ["-config", "%s"],
-      "env": { "RAGCODE_PHP_BRIDGE": "%s" }
-    }
-  }
-`, binPath, configPath, bridgePath)
-	} else {
-		fmt.Printf(`  {
+	fmt.Printf(`  {
     "ragcode": {
       "command": "%s",
       "args": ["-config", "%s"],
@@ -990,7 +941,6 @@ func printSummary(dir string) {
     }
   }
 `, binPath, configPath)
-	}
 	fmt.Println()
 	fmt.Println("Next: open your IDE and ask AI to index_workspace.")
 }
