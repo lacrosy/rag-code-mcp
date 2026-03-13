@@ -115,7 +115,7 @@ changelog:
 
 release:
   github:
-    owner: doITmagic
+    owner: lacrosy
     name: rag-code-mcp
 
   draft: false
@@ -133,23 +133,23 @@ release:
 
     **macOS (Apple Silicon):**
     ```bash
-    curl -fsSL https://github.com/doITmagic/rag-code-mcp/releases/latest/download/rag-code-mcp_darwin_arm64.tar.gz | tar xz
+    curl -fsSL https://github.com/lacrosy/rag-code-mcp/releases/latest/download/rag-code-mcp_darwin_arm64.tar.gz | tar xz
     ./ragcode-installer
     ```
 
     **macOS (Intel):**
     ```bash
-    curl -fsSL https://github.com/doITmagic/rag-code-mcp/releases/latest/download/rag-code-mcp_darwin_amd64.tar.gz | tar xz
+    curl -fsSL https://github.com/lacrosy/rag-code-mcp/releases/latest/download/rag-code-mcp_darwin_amd64.tar.gz | tar xz
     ./ragcode-installer
     ```
 
     **Linux (amd64):**
     ```bash
-    curl -fsSL https://github.com/doITmagic/rag-code-mcp/releases/latest/download/rag-code-mcp_linux_amd64.tar.gz | tar xz
+    curl -fsSL https://github.com/lacrosy/rag-code-mcp/releases/latest/download/rag-code-mcp_linux_amd64.tar.gz | tar xz
     ./ragcode-installer
     ```
 
     The installer puts everything into `./ragcode/` and configures detected IDEs automatically.
 
   footer: |
-    **Full documentation:** https://github.com/doITmagic/rag-code-mcp
+    **Full documentation:** https://github.com/lacrosy/rag-code-mcp

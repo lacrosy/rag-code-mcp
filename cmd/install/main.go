@@ -37,7 +37,7 @@ const (
 	qdrantContainer = "ragcode-qdrant"
 	defaultModel    = "phi3:medium"
 	defaultEmbed    = "nomic-embed-text"
-	repoURL         = "https://github.com/doITmagic/rag-code-mcp"
+	repoURL         = "https://github.com/lacrosy/rag-code-mcp"
 )
 
 // Colors
