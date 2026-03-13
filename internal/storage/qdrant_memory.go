@@ -100,6 +100,45 @@ func (m *QdrantLongTermMemory) SearchDocsOnly(ctx context.Context, query []float
 	return convertSearchResultsToDocuments(results), nil
 }
 
+// SearchCodeOnlyWithFilter searches for similar documents excluding markdown, with metadata filters.
+func (m *QdrantLongTermMemory) SearchCodeOnlyWithFilter(ctx context.Context, query []float64, limit int, filters map[string]string) ([]memory.Document, error) {
+	if len(query) == 0 {
+		return nil, fmt.Errorf("query embedding is required")
+	}
+	results, err := m.client.SearchCodeOnlyWithFilter(ctx, query, limit, filters)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search code with filter in qdrant: %w", err)
+	}
+	return convertSearchResultsToDocuments(results), nil
+}
+
+// ScrollByMetadata scrolls through points matching metadata filters without vector similarity.
+func (m *QdrantLongTermMemory) ScrollByMetadata(ctx context.Context, filters map[string]string, limit int) ([]memory.Document, error) {
+	results, err := m.client.ScrollByMetadata(ctx, filters, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scroll by metadata in qdrant: %w", err)
+	}
+	return convertSearchResultsToDocuments(results), nil
+}
+
+// ScrollAll scrolls through all code points in the collection (paginated).
+func (m *QdrantLongTermMemory) ScrollAll(ctx context.Context, maxResults int) ([]memory.Document, error) {
+	results, err := m.client.ScrollAll(ctx, maxResults)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scroll all in qdrant: %w", err)
+	}
+	return convertSearchResultsToDocuments(results), nil
+}
+
+// ScrollAllWithFilter scrolls through code points matching filters (paginated).
+func (m *QdrantLongTermMemory) ScrollAllWithFilter(ctx context.Context, filters map[string]string, maxResults int) ([]memory.Document, error) {
+	results, err := m.client.ScrollAllWithFilter(ctx, filters, maxResults)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scroll all with filter in qdrant: %w", err)
+	}
+	return convertSearchResultsToDocuments(results), nil
+}
+
 func convertSearchResultsToDocuments(results []SearchResult) []memory.Document {
 	documents := make([]memory.Document, 0, len(results))
 	for _, result := range results {

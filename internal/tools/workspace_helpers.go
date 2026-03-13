@@ -5,7 +5,47 @@ import (
 	"fmt"
 
 	"github.com/doITmagic/rag-code-mcp/internal/memory"
+	"github.com/doITmagic/rag-code-mcp/internal/workspace"
 )
+
+// resolveWorkspaceMemory detects workspace from params and returns the appropriate memory backend.
+// Returns (memory, workspacePath, collectionName, error).
+func resolveWorkspaceMemory(ctx context.Context, wm *workspace.Manager, fallback memory.LongTermMemory, params map[string]interface{}) (memory.LongTermMemory, string, string, error) {
+	filePath := extractFilePathFromParams(params)
+
+	if wm != nil {
+		workspaceInfo, err := wm.DetectWorkspace(params)
+		if err == nil && workspaceInfo != nil {
+			language := inferLanguageFromPath(filePath)
+			if language == "" && len(workspaceInfo.Languages) > 0 {
+				language = workspaceInfo.Languages[0]
+			}
+			if language == "" {
+				language = workspaceInfo.ProjectType
+			}
+
+			collectionName := workspaceInfo.CollectionNameForLanguage(language)
+			mem, err := wm.GetMemoryForWorkspaceLanguage(ctx, workspaceInfo, language)
+			if err == nil && mem != nil {
+				indexKey := workspaceInfo.ID + "-" + language
+				if wm.IsIndexing(indexKey) {
+					return nil, "", "", fmt.Errorf("workspace '%s' language '%s' is currently being indexed, try again later", workspaceInfo.Root, language)
+				}
+
+				if msg, err := CheckCollectionStatus(ctx, mem, collectionName, workspaceInfo.Root); err != nil || msg != "" {
+					if err != nil {
+						return nil, "", "", err
+					}
+					return nil, "", "", fmt.Errorf("%s", msg)
+				}
+
+				return mem, workspaceInfo.Root, collectionName, nil
+			}
+		}
+	}
+
+	return fallback, "", "", nil
+}
 
 // CheckCollectionStatus verifies if a collection exists and has data.
 // Returns an error message if the collection is missing or empty, nil otherwise.

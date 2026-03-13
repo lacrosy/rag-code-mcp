@@ -66,6 +66,9 @@ func (t *SearchLocalIndexTool) Execute(ctx context.Context, params map[string]in
 		outputFormat = strings.ToLower(of)
 	}
 
+	// Optional metadata filter
+	metadataFilter := extractMetadataFilter(params)
+
 	// Generate embedding for query
 	queryEmbedding, err := t.embedder.Embed(ctx, query)
 	if err != nil {
@@ -168,16 +171,26 @@ func (t *SearchLocalIndexTool) Execute(ctx context.Context, params map[string]in
 		}
 
 		// Search in workspace-specific collection, preferring code-only search
-		// Try SearchCodeOnly first (excludes markdown), fall back to Search
+		// Try filtered search first if metadata_filter is provided
 		var docs []memory.Document
 		var searchErr error
 
-		// Type assertion to check if this memory supports code-only search
+		type FilteredSearcher interface {
+			SearchCodeOnlyWithFilter(ctx context.Context, query []float64, limit int, filters map[string]string) ([]memory.Document, error)
+		}
 		type CodeSearcher interface {
 			SearchCodeOnly(ctx context.Context, query []float64, limit int) ([]memory.Document, error)
 		}
 
-		if searcher, ok := workspaceMem.(CodeSearcher); ok {
+		if len(metadataFilter) > 0 {
+			if fs, ok := workspaceMem.(FilteredSearcher); ok {
+				docs, searchErr = fs.SearchCodeOnlyWithFilter(ctx, queryEmbedding, limit, metadataFilter)
+			} else if searcher, ok := workspaceMem.(CodeSearcher); ok {
+				docs, searchErr = searcher.SearchCodeOnly(ctx, queryEmbedding, limit)
+			} else {
+				docs, searchErr = workspaceMem.Search(ctx, queryEmbedding, limit)
+			}
+		} else if searcher, ok := workspaceMem.(CodeSearcher); ok {
 			docs, searchErr = searcher.SearchCodeOnly(ctx, queryEmbedding, limit)
 		} else {
 			docs, searchErr = workspaceMem.Search(ctx, queryEmbedding, limit)

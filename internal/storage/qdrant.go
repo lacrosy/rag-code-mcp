@@ -462,6 +462,308 @@ func (c *QdrantClient) SearchByNameAndType(ctx context.Context, name string, typ
 	return results, nil
 }
 
+// SearchCodeOnlyWithFilter searches for similar vectors excluding markdown, with additional metadata filters.
+// filters is a map of key->value pairs that are added as Must conditions (exact keyword match).
+func (c *QdrantClient) SearchCodeOnlyWithFilter(ctx context.Context, vector []float64, limit int, filters map[string]string) ([]SearchResult, error) {
+	// Convert float64 to float32
+	vector32 := make([]float32, len(vector))
+	for i, v := range vector {
+		vector32[i] = float32(v)
+	}
+
+	// Build filter conditions: exclude markdown + user-provided filters
+	conditions := make([]*qdrant.Condition, 0, len(filters))
+	for key, val := range filters {
+		conditions = append(conditions, &qdrant.Condition{
+			ConditionOneOf: &qdrant.Condition_Field{
+				Field: &qdrant.FieldCondition{
+					Key: key,
+					Match: &qdrant.Match{
+						MatchValue: &qdrant.Match_Keyword{
+							Keyword: val,
+						},
+					},
+				},
+			},
+		})
+	}
+
+	searchResult, err := c.client.Query(ctx, &qdrant.QueryPoints{
+		CollectionName: c.config.Collection,
+		Query:          qdrant.NewQuery(vector32...),
+		Limit:          qdrant.PtrOf(uint64(limit)),
+		WithPayload:    qdrant.NewWithPayload(true),
+		Filter: &qdrant.Filter{
+			Must: conditions,
+			MustNot: []*qdrant.Condition{
+				{
+					ConditionOneOf: &qdrant.Condition_Field{
+						Field: &qdrant.FieldCondition{
+							Key: "chunk_type",
+							Match: &qdrant.Match{
+								MatchValue: &qdrant.Match_Keyword{
+									Keyword: "markdown",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to search code with filter: %w", err)
+	}
+
+	results := make([]SearchResult, 0, len(searchResult))
+	for _, point := range searchResult {
+		payload := make(map[string]interface{})
+		for key, val := range point.Payload {
+			payload[key] = val.GetStringValue()
+		}
+
+		var idStr string
+		if point.Id != nil && point.Id.GetNum() != 0 {
+			idStr = fmt.Sprintf("%d", point.Id.GetNum())
+		} else if point.Id != nil && point.Id.GetUuid() != "" {
+			idStr = point.Id.GetUuid()
+		}
+
+		results = append(results, SearchResult{
+			ID:      idStr,
+			Score:   float64(point.Score),
+			Payload: payload,
+		})
+	}
+
+	return results, nil
+}
+
+// ScrollByMetadata scrolls through points matching metadata filters without vector similarity.
+// filters is a map of key->value pairs that are added as Must conditions (exact keyword match).
+func (c *QdrantClient) ScrollByMetadata(ctx context.Context, filters map[string]string, limit int) ([]SearchResult, error) {
+	conditions := make([]*qdrant.Condition, 0, len(filters))
+	for key, val := range filters {
+		conditions = append(conditions, &qdrant.Condition{
+			ConditionOneOf: &qdrant.Condition_Field{
+				Field: &qdrant.FieldCondition{
+					Key: key,
+					Match: &qdrant.Match{
+						MatchValue: &qdrant.Match_Keyword{
+							Keyword: val,
+						},
+					},
+				},
+			},
+		})
+	}
+
+	scrollResult, err := c.client.Scroll(ctx, &qdrant.ScrollPoints{
+		CollectionName: c.config.Collection,
+		Filter: &qdrant.Filter{
+			Must: conditions,
+			MustNot: []*qdrant.Condition{
+				{
+					ConditionOneOf: &qdrant.Condition_Field{
+						Field: &qdrant.FieldCondition{
+							Key: "chunk_type",
+							Match: &qdrant.Match{
+								MatchValue: &qdrant.Match_Keyword{
+									Keyword: "markdown",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Limit:       qdrant.PtrOf(uint32(limit)),
+		WithPayload: qdrant.NewWithPayload(true),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to scroll by metadata: %w", err)
+	}
+
+	results := make([]SearchResult, 0, len(scrollResult))
+	for _, point := range scrollResult {
+		payload := make(map[string]interface{})
+		for key, val := range point.Payload {
+			payload[key] = val.GetStringValue()
+		}
+
+		var idStr string
+		if point.Id != nil && point.Id.GetNum() != 0 {
+			idStr = fmt.Sprintf("%d", point.Id.GetNum())
+		} else if point.Id != nil && point.Id.GetUuid() != "" {
+			idStr = point.Id.GetUuid()
+		}
+
+		results = append(results, SearchResult{
+			ID:      idStr,
+			Score:   1.0, // No similarity score for scroll
+			Payload: payload,
+		})
+	}
+
+	return results, nil
+}
+
+// ScrollAll scrolls through all points in the collection (paginated), excluding markdown.
+// Returns up to maxResults points. Used for aggregation (stats, unique values).
+func (c *QdrantClient) ScrollAll(ctx context.Context, maxResults int) ([]SearchResult, error) {
+	var allResults []SearchResult
+	var offset *qdrant.PointId
+	batchSize := uint32(100)
+	if maxResults > 0 && maxResults < int(batchSize) {
+		batchSize = uint32(maxResults)
+	}
+
+	for {
+		req := &qdrant.ScrollPoints{
+			CollectionName: c.config.Collection,
+			Filter: &qdrant.Filter{
+				MustNot: []*qdrant.Condition{
+					{
+						ConditionOneOf: &qdrant.Condition_Field{
+							Field: &qdrant.FieldCondition{
+								Key: "chunk_type",
+								Match: &qdrant.Match{
+									MatchValue: &qdrant.Match_Keyword{
+										Keyword: "markdown",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			Limit:       qdrant.PtrOf(batchSize),
+			WithPayload: qdrant.NewWithPayload(true),
+			Offset:      offset,
+		}
+
+		scrollResult, nextOffset, err := c.client.ScrollAndOffset(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scroll all: %w", err)
+		}
+
+		for _, point := range scrollResult {
+			payload := make(map[string]interface{})
+			for key, val := range point.Payload {
+				payload[key] = val.GetStringValue()
+			}
+			var idStr string
+			if point.Id != nil && point.Id.GetNum() != 0 {
+				idStr = fmt.Sprintf("%d", point.Id.GetNum())
+			} else if point.Id != nil && point.Id.GetUuid() != "" {
+				idStr = point.Id.GetUuid()
+			}
+			allResults = append(allResults, SearchResult{
+				ID:      idStr,
+				Score:   1.0,
+				Payload: payload,
+			})
+		}
+
+		if maxResults > 0 && len(allResults) >= maxResults {
+			allResults = allResults[:maxResults]
+			break
+		}
+		if nextOffset == nil || len(scrollResult) == 0 {
+			break
+		}
+		offset = nextOffset
+	}
+
+	return allResults, nil
+}
+
+// ScrollAllWithFilter scrolls through points matching metadata filters (paginated), excluding markdown.
+func (c *QdrantClient) ScrollAllWithFilter(ctx context.Context, filters map[string]string, maxResults int) ([]SearchResult, error) {
+	conditions := make([]*qdrant.Condition, 0, len(filters))
+	for key, val := range filters {
+		conditions = append(conditions, &qdrant.Condition{
+			ConditionOneOf: &qdrant.Condition_Field{
+				Field: &qdrant.FieldCondition{
+					Key: key,
+					Match: &qdrant.Match{
+						MatchValue: &qdrant.Match_Keyword{
+							Keyword: val,
+						},
+					},
+				},
+			},
+		})
+	}
+
+	var allResults []SearchResult
+	var offset *qdrant.PointId
+	batchSize := uint32(100)
+	if maxResults > 0 && maxResults < int(batchSize) {
+		batchSize = uint32(maxResults)
+	}
+
+	for {
+		req := &qdrant.ScrollPoints{
+			CollectionName: c.config.Collection,
+			Filter: &qdrant.Filter{
+				Must: conditions,
+				MustNot: []*qdrant.Condition{
+					{
+						ConditionOneOf: &qdrant.Condition_Field{
+							Field: &qdrant.FieldCondition{
+								Key: "chunk_type",
+								Match: &qdrant.Match{
+									MatchValue: &qdrant.Match_Keyword{
+										Keyword: "markdown",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			Limit:       qdrant.PtrOf(batchSize),
+			WithPayload: qdrant.NewWithPayload(true),
+			Offset:      offset,
+		}
+
+		scrollResult, nextOffset, err := c.client.ScrollAndOffset(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scroll with filter: %w", err)
+		}
+
+		for _, point := range scrollResult {
+			payload := make(map[string]interface{})
+			for key, val := range point.Payload {
+				payload[key] = val.GetStringValue()
+			}
+			var idStr string
+			if point.Id != nil && point.Id.GetNum() != 0 {
+				idStr = fmt.Sprintf("%d", point.Id.GetNum())
+			} else if point.Id != nil && point.Id.GetUuid() != "" {
+				idStr = point.Id.GetUuid()
+			}
+			allResults = append(allResults, SearchResult{
+				ID:      idStr,
+				Score:   1.0,
+				Payload: payload,
+			})
+		}
+
+		if maxResults > 0 && len(allResults) >= maxResults {
+			allResults = allResults[:maxResults]
+			break
+		}
+		if nextOffset == nil || len(scrollResult) == 0 {
+			break
+		}
+		offset = nextOffset
+	}
+
+	return allResults, nil
+}
+
 // Delete deletes a vector by ID
 func (c *QdrantClient) Delete(ctx context.Context, id string) error {
 	_, err := c.client.Delete(ctx, &qdrant.DeletePoints{

@@ -118,6 +118,30 @@ func inferLanguageFromPath(filePath string) string {
 	}
 }
 
+// extractMetadataFilter extracts metadata_filter from params as map[string]string.
+// Accepts map[string]interface{} (from JSON) or map[string]string directly.
+func extractMetadataFilter(params map[string]interface{}) map[string]string {
+	raw, ok := params["metadata_filter"]
+	if !ok || raw == nil {
+		return nil
+	}
+	result := make(map[string]string)
+	switch v := raw.(type) {
+	case map[string]interface{}:
+		for k, val := range v {
+			if s, ok := val.(string); ok {
+				result[k] = s
+			}
+		}
+	case map[string]string:
+		return v
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // extractFilePathFromParams extracts file path from common parameter names
 func extractFilePathFromParams(params map[string]interface{}) string {
 	pathParams := []string{

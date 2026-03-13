@@ -72,6 +72,9 @@ func (t *HybridSearchTool) Execute(ctx context.Context, params map[string]interf
 		outputFormat = strings.ToLower(of)
 	}
 
+	// Optional metadata filter
+	metadataFilter := extractMetadataFilter(params)
+
 	// file_path is required for workspace detection
 	filePath := extractFilePathFromParams(params)
 	if filePath == "" {
@@ -141,14 +144,25 @@ func (t *HybridSearchTool) Execute(ctx context.Context, params map[string]interf
 	}
 
 	// 2. Gather semantic candidates (more than the limit to allow lexical filtering)
-	// Prefer SearchCodeOnly to exclude markdown documentation
+	// Prefer filtered search if metadata_filter is provided
+	type FilteredSearcher interface {
+		SearchCodeOnlyWithFilter(ctx context.Context, query []float64, limit int, filters map[string]string) ([]memory.Document, error)
+	}
 	type CodeSearcher interface {
 		SearchCodeOnly(ctx context.Context, query []float64, limit int) ([]memory.Document, error)
 	}
 
 	fetchLimit := int(math.Max(float64(limit*5), 10))
 	var docs []memory.Document
-	if codeSearcher, ok := searchMemory.(CodeSearcher); ok {
+	if len(metadataFilter) > 0 {
+		if fs, ok := searchMemory.(FilteredSearcher); ok {
+			docs, err = fs.SearchCodeOnlyWithFilter(ctx, queryEmbedding, fetchLimit, metadataFilter)
+		} else if codeSearcher, ok := searchMemory.(CodeSearcher); ok {
+			docs, err = codeSearcher.SearchCodeOnly(ctx, queryEmbedding, fetchLimit)
+		} else {
+			docs, err = searchMemory.Search(ctx, queryEmbedding, fetchLimit)
+		}
+	} else if codeSearcher, ok := searchMemory.(CodeSearcher); ok {
 		docs, err = codeSearcher.SearchCodeOnly(ctx, queryEmbedding, fetchLimit)
 	} else {
 		docs, err = searchMemory.Search(ctx, queryEmbedding, fetchLimit)
