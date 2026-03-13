@@ -146,6 +146,9 @@ func main() {
 		}
 	}
 
+	// Supported languages to try indexing
+	supportedLanguages := []string{"go", "php", "python", "html"}
+
 	// Index each path separately — each path is its own workspace root for scanning
 	for _, p := range paths {
 		cleanPath := filepath.Clean(p)
@@ -153,20 +156,19 @@ func main() {
 			ID:               workspaceID,
 			Root:             cleanPath,
 			ProjectType:      "mixed",
-			Languages:        []string{"go", "php"},
 			CollectionPrefix: collectionPrefix,
 		}
 
-		// Index Go files
-		fmt.Printf("🔎 Indexing Go files in '%s' (incremental)...\n", cleanPath)
-		if err := mgr.IndexLanguage(ctx, info, "go", codeCollection, false); err != nil {
-			log.Printf("⚠️ Go indexing warning: %v", err)
-		}
-
-		// Index PHP files
-		fmt.Printf("🔎 Indexing PHP files in '%s' (incremental)...\n", cleanPath)
-		if err := mgr.IndexLanguage(ctx, info, "php", codeCollection, false); err != nil {
-			log.Printf("⚠️ PHP indexing warning: %v", err)
+		// Try each language — IndexLanguage will skip if no files found
+		for _, lang := range supportedLanguages {
+			fmt.Printf("🔎 Indexing %s files in '%s' (incremental)...\n", capitalizeFirst(lang), cleanPath)
+			if err := mgr.IndexLanguage(ctx, info, lang, codeCollection, false); err != nil {
+				if strings.Contains(err.Error(), "no") && strings.Contains(err.Error(), "source files detected") {
+					// Silently skip — no files of this language in this dir
+					continue
+				}
+				log.Printf("⚠️ %s indexing warning: %v", capitalizeFirst(lang), err)
+			}
 		}
 	}
 
@@ -367,4 +369,11 @@ func indexMarkdownFile(ctx context.Context, provider llm.Provider, ltm memory.Lo
 	}
 
 	return nil
+}
+
+func capitalizeFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

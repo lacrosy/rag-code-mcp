@@ -19,17 +19,25 @@ import (
 // Default: HTTP mode via Docker container (RAGCODE_PHP_BRIDGE_URL, default http://localhost:9100).
 // Fallback: CLI mode if RAGCODE_PHP_BRIDGE is explicitly set to a parse.php path.
 type BridgeAnalyzer struct {
-	httpURL string
-	client  *http.Client
+	httpURL       string
+	client        *http.Client
+	extractorsDir string
 }
 
 // NewBridgeAnalyzer creates a new PHP bridge analyzer.
 // Default: Docker HTTP mode on localhost:9100.
 // Override: set RAGCODE_PHP_BRIDGE=/path/to/parse.php for CLI mode.
 func NewBridgeAnalyzer() *BridgeAnalyzer {
+	return NewBridgeAnalyzerWithExtractors("")
+}
+
+// NewBridgeAnalyzerWithExtractors creates a PHP bridge analyzer with an optional
+// custom extractors directory. The directory path is passed to the PHP bridge
+// so it can load project-specific *Extractor.php plugins.
+func NewBridgeAnalyzerWithExtractors(extractorsDir string) *BridgeAnalyzer {
 	// CLI mode override
 	if bridgePath := os.Getenv("RAGCODE_PHP_BRIDGE"); bridgePath != "" {
-		return &BridgeAnalyzer{}
+		return &BridgeAnalyzer{extractorsDir: extractorsDir}
 	}
 	// Default: Docker HTTP mode
 	url := os.Getenv("RAGCODE_PHP_BRIDGE_URL")
@@ -37,8 +45,9 @@ func NewBridgeAnalyzer() *BridgeAnalyzer {
 		url = "http://localhost:9100"
 	}
 	return &BridgeAnalyzer{
-		httpURL: strings.TrimRight(url, "/"),
-		client:  &http.Client{Timeout: 120 * time.Second},
+		httpURL:       strings.TrimRight(url, "/"),
+		client:        &http.Client{Timeout: 120 * time.Second},
+		extractorsDir: extractorsDir,
 	}
 }
 
@@ -117,7 +126,7 @@ func (ba *BridgeAnalyzer) AnalyzePaths(paths []string) ([]codetypes.CodeChunk, e
 		if pathErr != nil {
 			return nil, pathErr
 		}
-		symbols, err = runBridge(bridgePath, phpFiles)
+		symbols, err = ba.runBridgeCLI(bridgePath, phpFiles)
 	}
 
 	if err != nil {
@@ -146,7 +155,11 @@ func (ba *BridgeAnalyzer) runBridgeHTTP(files []string) ([]bridgeSymbol, error) 
 		}
 		batch := files[i:end]
 
-		reqBody, err := json.Marshal(map[string][]string{"files": batch})
+		reqPayload := map[string]interface{}{"files": batch}
+		if ba.extractorsDir != "" {
+			reqPayload["extractors_dir"] = ba.extractorsDir
+		}
+		reqBody, err := json.Marshal(reqPayload)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal request: %w", err)
 		}
@@ -243,15 +256,19 @@ func collectPHPFiles(root string) ([]string, error) {
 	return files, err
 }
 
-// runBridge executes the PHP bridge script with a batch of files via stdin.
-func runBridge(bridgePath string, files []string) ([]bridgeSymbol, error) {
+// runBridgeCLI executes the PHP bridge script with a batch of files via stdin.
+func (ba *BridgeAnalyzer) runBridgeCLI(bridgePath string, files []string) ([]bridgeSymbol, error) {
 	// Check if php is available
 	phpBin, err := exec.LookPath("php")
 	if err != nil {
 		return nil, fmt.Errorf("PHP CLI not found in PATH. Install PHP 8.1+ to use the PHP analyzer: %w", err)
 	}
 
-	cmd := exec.Command(phpBin, bridgePath, "--batch")
+	args := []string{bridgePath, "--batch"}
+	if ba.extractorsDir != "" {
+		args = append(args, "--extractors-dir", ba.extractorsDir)
+	}
+	cmd := exec.Command(phpBin, args...)
 	cmd.Stdin = strings.NewReader(strings.Join(files, "\n"))
 
 	var stdout, stderr bytes.Buffer

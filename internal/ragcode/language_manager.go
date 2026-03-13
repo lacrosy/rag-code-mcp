@@ -54,13 +54,18 @@ func normalizeProjectType(projectType string) Language {
 
 // CodeAnalyzerForProjectType returns a PathAnalyzer appropriate for the project type.
 // It returns nil when no analyzer is available for the given language.
-func (m *AnalyzerManager) CodeAnalyzerForProjectType(projectType string) codetypes.PathAnalyzer {
+// Optional phpExtractorsDir specifies a directory with custom PHP extractor plugins.
+func (m *AnalyzerManager) CodeAnalyzerForProjectType(projectType string, phpExtractorsDir ...string) codetypes.PathAnalyzer {
 	lang := normalizeProjectType(projectType)
 	switch lang {
 	case LanguageGo:
 		return golang.NewCodeAnalyzer()
 	case LanguagePHP:
-		return php.NewBridgeAnalyzer()
+		extDir := ""
+		if len(phpExtractorsDir) > 0 {
+			extDir = phpExtractorsDir[0]
+		}
+		return php.NewBridgeAnalyzerWithExtractors(extDir)
 	case LanguageHTML:
 		return htmlanalyzer.NewCodeAnalyzer()
 	case LanguagePython:

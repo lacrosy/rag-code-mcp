@@ -616,8 +616,17 @@ func (m *Manager) IndexLanguage(ctx context.Context, info *Info, language string
 	ltm := storage.NewQdrantLongTermMemory(collectionClient)
 
 	// Select analyzer based on language (not ProjectType)
+	// Resolve custom PHP extractors directory from config
+	phpExtractorsDir := ""
+	if extDir := m.config.Workspace.PHPExtractorsDir; extDir != "" {
+		if filepath.IsAbs(extDir) {
+			phpExtractorsDir = extDir
+		} else {
+			phpExtractorsDir = filepath.Join(info.Root, extDir)
+		}
+	}
 	analyzerManager := ragcode.NewAnalyzerManager()
-	analyzer := analyzerManager.CodeAnalyzerForProjectType(language)
+	analyzer := analyzerManager.CodeAnalyzerForProjectType(language, phpExtractorsDir)
 	if analyzer == nil {
 		return fmt.Errorf("no code analyzer available for language '%s'", language)
 	}
@@ -669,22 +678,22 @@ func (m *Manager) IndexLanguage(ctx context.Context, info *Info, language string
 	currentDocs := scan.DocFiles
 
 	// Check for added or modified files (Code)
+	// We collect file info but do NOT update state until after successful indexing
+	fileInfoMap := make(map[string]os.FileInfo)
 	for _, path := range currentFiles {
-		info, err := os.Stat(path)
+		fi, err := os.Stat(path)
 		if err != nil {
 			continue
 		}
 
 		fileState, exists := state.GetFileState(path)
-		if !exists || info.ModTime().After(fileState.ModTime) || info.Size() != fileState.Size {
+		if !exists || fi.ModTime().After(fileState.ModTime) || fi.Size() != fileState.Size {
 			filesToIndex = append(filesToIndex, path)
 			if exists {
 				filesToDelete = append(filesToDelete, path)
 			}
 		}
-
-		// Update state
-		state.UpdateFile(path, info)
+		fileInfoMap[path] = fi
 	}
 
 	// Check for added or modified files (Docs)
@@ -692,21 +701,19 @@ func (m *Manager) IndexLanguage(ctx context.Context, info *Info, language string
 	var docsToDelete []string
 
 	for _, path := range currentDocs {
-		info, err := os.Stat(path)
+		fi, err := os.Stat(path)
 		if err != nil {
 			continue
 		}
 
 		fileState, exists := state.GetFileState(path)
-		if !exists || info.ModTime().After(fileState.ModTime) || info.Size() != fileState.Size {
+		if !exists || fi.ModTime().After(fileState.ModTime) || fi.Size() != fileState.Size {
 			docsToIndex = append(docsToIndex, path)
 			if exists {
 				docsToDelete = append(docsToDelete, path)
 			}
 		}
-
-		// Update state
-		state.UpdateFile(path, info)
+		fileInfoMap[path] = fi
 	}
 
 	// Check for deleted files (both code and docs)
@@ -750,16 +757,35 @@ func (m *Manager) IndexLanguage(ctx context.Context, info *Info, language string
 	}
 
 	// Process indexing (Code)
+	skippedFiles := len(currentFiles) - len(filesToIndex)
 	if len(filesToIndex) > 0 {
-		log.Printf("📝 Indexing %d new/modified code files...", len(filesToIndex))
+		if skippedFiles > 0 {
+			log.Printf("📝 Indexing %d new/modified code files... (%d already indexed, skipped)", len(filesToIndex), skippedFiles)
+		} else {
+			log.Printf("📝 Indexing %d new/modified code files...", len(filesToIndex))
+		}
 
 		indexer := ragcode.NewIndexer(analyzer, m.llm, ltm)
+
+		// Save state incrementally as each file completes — survives Ctrl+C
+		indexer.SetOnFileIndexed(func(filePath string) {
+			if fi, ok := fileInfoMap[filePath]; ok {
+				state.UpdateFile(filePath, fi)
+			}
+			if err := state.Save(stateFile); err != nil {
+				log.Printf("⚠️  Failed to save incremental state: %v", err)
+			}
+		})
 
 		startTime := time.Now()
 		numChunks, err := indexer.IndexPaths(ctx, filesToIndex, collectionName)
 		duration := time.Since(startTime)
 
 		if err != nil {
+			// Save state even on error — preserves progress for already-indexed files
+			if saveErr := state.Save(stateFile); saveErr != nil {
+				log.Printf("⚠️  Failed to save workspace state: %v", saveErr)
+			}
 			return fmt.Errorf("indexing failed: %w", err)
 		}
 		log.Printf("✅ Indexed %d chunks in %v", numChunks, duration)
@@ -775,13 +801,26 @@ func (m *Manager) IndexLanguage(ctx context.Context, info *Info, language string
 		if numDocs > 0 {
 			log.Printf("   Docs chunks indexed: %d", numDocs)
 		}
+		// Update state for indexed docs
+		for _, path := range docsToIndex {
+			if fi, ok := fileInfoMap[path]; ok {
+				state.UpdateFile(path, fi)
+			}
+		}
 	} else {
 		if len(currentDocs) > 0 {
 			log.Printf("✨ No documentation changes detected")
 		}
 	}
 
-	// Save state
+	// Update state for files that were already indexed (unchanged files)
+	for _, path := range currentFiles {
+		if fi, ok := fileInfoMap[path]; ok {
+			state.UpdateFile(path, fi)
+		}
+	}
+
+	// Final state save
 	if err := state.Save(stateFile); err != nil {
 		log.Printf("⚠️  Failed to save workspace state: %v", err)
 	}
