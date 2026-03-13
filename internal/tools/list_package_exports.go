@@ -115,7 +115,7 @@ func (t *ListPackageExportsTool) Execute(ctx context.Context, args map[string]in
 		}
 	}
 
-	// If this looks like a PHP/Laravel workspace, prefer using the PHP analyzer directly
+	// If this looks like a PHP/Symfony workspace, prefer using the PHP analyzer directly
 	if workspaceInfo != nil && isPHPLikeProject(workspaceInfo.ProjectType) {
 		return listPHPExports(ctx, workspaceInfo, packageName, filterType, outputFormat)
 	}
@@ -311,10 +311,10 @@ func isExported(name string) bool {
 	return first >= 'A' && first <= 'Z'
 }
 
-// isPHPLikeProject returns true for php / php-laravel / laravel project types.
+// isPHPLikeProject returns true for php / php-symfony / symfony project types.
 func isPHPLikeProject(projectType string) bool {
 	pt := strings.ToLower(strings.TrimSpace(projectType))
-	return pt == "php" || pt == "php-laravel" || pt == "laravel"
+	return pt == "php" || pt == "php-symfony" || pt == "symfony"
 }
 
 // listPHPExports uses the PHP analyzer directly to list exported symbols (classes, functions, constants)
@@ -323,7 +323,7 @@ func isPHPLikeProject(projectType string) bool {
 // outputFormat can be "markdown" (default) or "json". The JSON form returns a
 // list of codetypes.SymbolDescriptor values encoded as JSON.
 func listPHPExports(ctx context.Context, info *workspace.Info, packageName string, filterType, outputFormat string) (string, error) {
-	analyzer := php.NewCodeAnalyzer()
+	analyzer := php.NewBridgeAnalyzer()
 	// Analyze the entire workspace root; PHP analyzer will respect vendor/public exclusions
 	chunks, err := analyzer.AnalyzePaths([]string{info.Root})
 	if err != nil {

@@ -109,18 +109,68 @@ func (m *Manager) scanWorkspace(info *Info) (*workspaceScan, error) {
 		GeneratedAt:   time.Now(),
 	}
 	dirCache := make(map[string]map[string]struct{})
-	err := filepath.WalkDir(info.Root, func(path string, d fs.DirEntry, err error) error {
+
+	// Build skip-set from config
+	skipDirs := m.buildSkipDirs()
+	excludePatterns := m.getExcludePatterns()
+
+	// If IndexInclude is set, scan only those directories (whitelist mode)
+	if includes := m.getIndexIncludes(); len(includes) > 0 {
+		for _, inc := range includes {
+			incPath := filepath.Join(info.Root, inc)
+			if fi, err := os.Stat(incPath); err != nil || !fi.IsDir() {
+				continue
+			}
+			if err := m.walkDir(incPath, scan, dirCache, skipDirs, excludePatterns, info.Root); err != nil {
+				log.Printf("Warning: error scanning included dir %s: %v", incPath, err)
+			}
+		}
+		return scan, nil
+	}
+
+	// Default: scan everything, respecting skip-dirs and exclude-patterns
+	if err := m.walkDir(info.Root, scan, dirCache, skipDirs, excludePatterns, info.Root); err != nil {
+		return nil, err
+	}
+	return scan, nil
+}
+
+// walkDir walks a directory tree and collects files by language.
+func (m *Manager) walkDir(root string, scan *workspaceScan, dirCache map[string]map[string]struct{}, skipDirs map[string]struct{}, excludePatterns []string, wsRoot string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if d.IsDir() {
-			if path == info.Root {
+			if path == root {
 				return nil
 			}
-			if _, skip := defaultSkipDirs[d.Name()]; skip {
+			dirName := d.Name()
+			if _, skip := skipDirs[dirName]; skip {
 				return filepath.SkipDir
 			}
+			// Check exclude patterns against relative path
+			relPath, _ := filepath.Rel(wsRoot, path)
+			for _, pattern := range excludePatterns {
+				if matched, _ := filepath.Match(pattern, relPath); matched {
+					return filepath.SkipDir
+				}
+				if matched, _ := filepath.Match(pattern, dirName); matched {
+					return filepath.SkipDir
+				}
+			}
 			return nil
+		}
+
+		// Check file-level exclude patterns
+		relPath, _ := filepath.Rel(wsRoot, path)
+		for _, pattern := range excludePatterns {
+			if matched, _ := filepath.Match(pattern, filepath.Base(path)); matched {
+				return nil
+			}
+			if matched, _ := filepath.Match(pattern, relPath); matched {
+				return nil
+			}
 		}
 
 		scan.TotalFiles++
@@ -145,10 +195,36 @@ func (m *Manager) scanWorkspace(info *Info) (*workspaceScan, error) {
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, err
+}
+
+// buildSkipDirs merges defaultSkipDirs with config.Workspace.IndexExclude.
+func (m *Manager) buildSkipDirs() map[string]struct{} {
+	skip := make(map[string]struct{}, len(defaultSkipDirs))
+	for k, v := range defaultSkipDirs {
+		skip[k] = v
 	}
-	return scan, nil
+	if m.config != nil {
+		for _, dir := range m.config.Workspace.IndexExclude {
+			skip[dir] = struct{}{}
+		}
+	}
+	return skip
+}
+
+// getExcludePatterns returns glob patterns from config.
+func (m *Manager) getExcludePatterns() []string {
+	if m.config != nil {
+		return m.config.Workspace.ExcludePatterns
+	}
+	return nil
+}
+
+// getIndexIncludes returns the whitelist of directories from config.
+func (m *Manager) getIndexIncludes() []string {
+	if m.config != nil {
+		return m.config.Workspace.IndexInclude
+	}
+	return nil
 }
 
 func (s *workspaceScan) fingerprint(language string) string {

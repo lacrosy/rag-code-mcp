@@ -1,7 +1,6 @@
 package php
 
 import (
-	"github.com/VKCOM/php-parser/pkg/ast"
 	"github.com/doITmagic/rag-code-mcp/internal/codetypes"
 )
 
@@ -14,12 +13,10 @@ type PackageInfo struct {
 	Classes     []ClassInfo     `json:"classes"`
 	Interfaces  []InterfaceInfo `json:"interfaces"`
 	Traits      []TraitInfo     `json:"traits"`
+	Enums       []EnumInfo      `json:"enums"`
 	Functions   []FunctionInfo  `json:"functions"` // Global functions
 	Constants   []ConstantInfo  `json:"constants"` // Global constants
 	Uses        []string        `json:"uses"`      // Use imports
-
-	// AST nodes for advanced analysis (not serialized to JSON)
-	ClassNodes map[string]*ast.StmtClass `json:"-"` // Map: full class name -> AST node
 }
 
 // ClassInfo describes a PHP class
@@ -36,6 +33,7 @@ type ClassInfo struct {
 	Constants   []ConstantInfo    `json:"constants"`
 	IsAbstract  bool              `json:"is_abstract"`
 	IsFinal     bool              `json:"is_final"`
+	IsReadonly  bool              `json:"is_readonly"` // PHP 8.2+
 	FilePath    string            `json:"file_path,omitempty"`
 	StartLine   int               `json:"start_line,omitempty"`
 	EndLine     int               `json:"end_line,omitempty"`
@@ -70,6 +68,30 @@ type TraitInfo struct {
 	StartLine   int            `json:"start_line,omitempty"`
 	EndLine     int            `json:"end_line,omitempty"`
 	Code        string         `json:"code,omitempty"`
+}
+
+// EnumInfo describes a PHP 8.1+ enum
+type EnumInfo struct {
+	Name        string         `json:"name"`
+	Namespace   string         `json:"namespace"`
+	FullName    string         `json:"full_name"`
+	Description string         `json:"description"`
+	BackedType  string         `json:"backed_type,omitempty"` // "string", "int", or ""
+	Cases       []EnumCase     `json:"cases"`
+	Methods     []MethodInfo   `json:"methods"`
+	Constants   []ConstantInfo `json:"constants"`
+	Implements  []string       `json:"implements,omitempty"`
+	Uses        []string       `json:"uses,omitempty"` // Trait usage
+	FilePath    string         `json:"file_path,omitempty"`
+	StartLine   int            `json:"start_line,omitempty"`
+	EndLine     int            `json:"end_line,omitempty"`
+	Code        string         `json:"code,omitempty"`
+}
+
+// EnumCase describes an enum case
+type EnumCase struct {
+	Name  string `json:"name"`
+	Value string `json:"value,omitempty"` // For backed enums
 }
 
 // MethodInfo describes a class/interface/trait method
@@ -112,23 +134,25 @@ type FunctionInfo struct {
 
 // PropertyInfo describes a class/trait property
 type PropertyInfo struct {
-	Name         string `json:"name"`
-	Type         string `json:"type,omitempty"` // Type hint if available
-	DefaultValue string `json:"default_value,omitempty"`
-	Description  string `json:"description"`
-	Visibility   string `json:"visibility"` // public, protected, private
-	IsStatic     bool   `json:"is_static"`
-	IsReadonly   bool   `json:"is_readonly"` // PHP 8.1+
-	FilePath     string `json:"file_path,omitempty"`
-	StartLine    int    `json:"start_line,omitempty"`
-	EndLine      int    `json:"end_line,omitempty"`
+	Name          string `json:"name"`
+	Type          string `json:"type,omitempty"` // Type hint if available
+	DefaultValue  string `json:"default_value,omitempty"`
+	Description   string `json:"description"`
+	Visibility    string `json:"visibility"` // public, protected, private
+	SetVisibility string `json:"set_visibility,omitempty"` // PHP 8.4 asymmetric visibility
+	IsStatic      bool   `json:"is_static"`
+	IsReadonly    bool   `json:"is_readonly"`          // PHP 8.1+
+	HasHooks      bool   `json:"has_hooks,omitempty"`  // PHP 8.4 property hooks
+	FilePath      string `json:"file_path,omitempty"`
+	StartLine     int    `json:"start_line,omitempty"`
+	EndLine       int    `json:"end_line,omitempty"`
 }
 
 // ConstantInfo describes a class/interface constant or global constant
 type ConstantInfo struct {
 	Name        string `json:"name"`
 	Value       string `json:"value"`
-	Type        string `json:"type,omitempty"`
+	Type        string `json:"type,omitempty"` // PHP 8.3 typed constants
 	Description string `json:"description"`
 	Visibility  string `json:"visibility,omitempty"` // For class constants (PHP 7.1+)
 	ClassName   string `json:"class_name,omitempty"` // If class constant

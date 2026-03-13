@@ -17,16 +17,16 @@ import (
 	"time"
 )
 
-// Configuration Flags
+// Flags
 var (
-	ollamaMode    = flag.String("ollama", "local", "Mode for Ollama: 'local' (use existing) or 'docker' (run container)")
-	qdrantMode    = flag.String("qdrant", "docker", "Mode for Qdrant: 'docker' (run container) or 'remote' (use existing URL)")
-	modelsDir     = flag.String("models-dir", "", "Path to local Ollama models directory (for Docker mapping). Defaults to ~/.ollama")
-	gpu           = flag.Bool("gpu", false, "Enable GPU support for Docker containers (requires nvidia-container-toolkit)")
-	skipBuild     = flag.Bool("skip-build", false, "Skip building the binary (use existing if available)")
-	idesFlag      = flag.String("ides", "auto", "Comma-separated IDE list to configure (auto, vs-code, claude, cursor, windsurf, antigravity)")
+	ollamaMode    = flag.String("ollama", "local", "Ollama mode: 'local' (existing) or 'docker' (container)")
+	qdrantMode    = flag.String("qdrant", "docker", "Qdrant mode: 'docker' (container) or 'remote' (existing URL)")
+	gpu           = flag.Bool("gpu", false, "Enable GPU for Docker containers")
+	skipBuild     = flag.Bool("skip-build", false, "Skip building binaries (use pre-built from release)")
+	installDir    = flag.String("dir", "./ragcode", "Installation directory (relative to CWD or absolute)")
+	idesFlag      = flag.String("ides", "auto", "IDE list: auto, claude, cursor, vs-code, windsurf, copilot, antigravity")
 	upgradeFlag   = flag.Bool("upgrade", false, "Upgrade existing installation")
-	uninstallFlag = flag.Bool("uninstall", false, "Uninstall the application and clean up configurations")
+	uninstallFlag = flag.Bool("uninstall", false, "Uninstall and clean up")
 )
 
 // Constants
@@ -36,11 +36,11 @@ const (
 	ollamaContainer = "ragcode-ollama"
 	qdrantContainer = "ragcode-qdrant"
 	defaultModel    = "phi3:medium"
-	defaultEmbed    = "mxbai-embed-large"
-	installDirName  = ".local/share/ragcode"
+	defaultEmbed    = "nomic-embed-text"
+	repoURL         = "https://github.com/doITmagic/rag-code-mcp"
 )
 
-// Colors for output
+// Colors
 var (
 	blue   = "\033[0;34m"
 	green  = "\033[0;32m"
@@ -51,108 +51,7 @@ var (
 
 func init() {
 	if runtime.GOOS == "windows" {
-		// Disable colors on Windows to avoid garbage characters
 		blue, green, yellow, red, reset = "", "", "", "", ""
-	}
-}
-
-func installRuntimeBinaries() {
-	// Stop any running servers before attempting to replace binaries
-	stopRunningServers()
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fail(fmt.Sprintf("Could not determine user home directory: %v", err))
-	}
-	installDir := filepath.Join(home, installDirName)
-	binDir := filepath.Join(installDir, "bin")
-
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		fail(fmt.Sprintf("Could not create install dir %s: %v", binDir, err))
-	}
-
-	stopRunningBinaries()
-
-	binaries := []struct {
-		name string
-		pkg  string
-	}{
-		{"rag-code-mcp", "./cmd/rag-code-mcp"},
-		{"index-all", "./cmd/index-all"},
-		{"ragcode-installer", "./cmd/install"},
-	}
-
-	log(fmt.Sprintf("Installing runtime binaries into %s...", binDir))
-	for _, bin := range binaries { // Install/update all to ensure latest version
-		binName := bin.name
-		if runtime.GOOS == "windows" {
-			binName += ".exe"
-		}
-		output := filepath.Join(binDir, binName)
-
-		// Option 1: Check if pre-built binary exists in current directory
-		if _, err := os.Stat(binName); err == nil {
-			log(fmt.Sprintf(" - Found %s in current directory, copying...", binName))
-			if err := copyFile(binName, output); err != nil {
-				fail(fmt.Sprintf("Failed to copy %s: %v", binName, err))
-			}
-		} else if _, err := os.Stat(bin.pkg); err == nil {
-			// Option 2: Build from source
-			if _, err := exec.LookPath("go"); err == nil {
-				log(fmt.Sprintf(" - Building %s from source...", bin.name))
-				cmd := exec.Command("go", "build", "-o", output, bin.pkg)
-				if err := cmd.Run(); err != nil {
-					warn(fmt.Sprintf("Failed to build %s: %v", bin.name, err))
-					continue
-				}
-			}
-		}
-
-		if _, err := os.Stat(output); err == nil {
-			if err := os.Chmod(output, 0755); err != nil {
-				warn(fmt.Sprintf("Could not set executable flag for %s: %v", output, err))
-			}
-
-			// CLI Tool Support: Symlink to ~/.local/bin if it exists
-			localBin := filepath.Join(home, ".local", "bin")
-			if _, err := os.Stat(localBin); err == nil {
-				linkPath := filepath.Join(localBin, binName)
-				os.Remove(linkPath) // Remove old link
-				if err := os.Symlink(output, linkPath); err == nil {
-					success(fmt.Sprintf("Linked %s to %s", binName, linkPath))
-				}
-			}
-		}
-	}
-}
-
-func runHealthCheck() {
-	log("Running RagCode health check...")
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fail(fmt.Sprintf("Could not determine user home directory: %v", err))
-	}
-	installDir := filepath.Join(home, installDirName)
-	binPath := filepath.Join(installDir, "bin", "rag-code-mcp")
-
-	if runtime.GOOS == "windows" {
-		binPath += ".exe"
-	}
-
-	if _, err := os.Stat(binPath); err != nil {
-		warn(fmt.Sprintf("Health check skipped – binary not found at %s", binPath))
-		return
-	}
-
-	cmd := exec.Command(binPath, "--health")
-	cmd.Dir = installDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		warn(fmt.Sprintf("Health check reported issues. Run '%s --health' manually for details.", binPath))
-	} else {
-		success("Health check passed – all services are reachable")
 	}
 }
 
@@ -161,441 +60,150 @@ func success(msg string) { fmt.Printf("%s✓ %s%s\n", green, msg, reset) }
 func warn(msg string)    { fmt.Printf("%s! %s%s\n", yellow, msg, reset) }
 func fail(msg string)    { fmt.Printf("%s✗ %s%s\n", red, msg, reset); os.Exit(1) }
 
-func stopRunningBinaries() {
-	log("Stopping any running RagCode processes...")
-	if runtime.GOOS == "windows" {
-		_ = exec.Command("taskkill", "/F", "/IM", "rag-code-mcp.exe", "/T").Run()
-	} else {
-		// Stop any running rag-code-mcp processes
-		// We use pkill -f to match the process name or full command line
-		_ = exec.Command("pkill", "-f", "rag-code-mcp").Run()
-		// Give it a short moment to release file handles
-		time.Sleep(500 * time.Millisecond)
-	}
+func commandExists(cmd string) bool {
+	_, err := exec.LookPath(cmd)
+	return err == nil
 }
 
-func checkDockerAvailable() {
-	log("Checking Docker availability...")
-
-	// Check if docker command exists in PATH
-	dockerPath, err := exec.LookPath("docker")
-	if err != nil {
-		if runtime.GOOS == "windows" {
-			fmt.Println()
-			fmt.Println("Docker CLI not found in PATH.")
-			fmt.Println()
-			fmt.Println("If you have Docker Desktop installed with WSL2 backend, you have two options:")
-			fmt.Println()
-			fmt.Println("  Option 1: Enable Docker CLI for Windows")
-			fmt.Println("    1. Open Docker Desktop")
-			fmt.Println("    2. Go to Settings > Resources > WSL Integration")
-			fmt.Println("    3. Enable 'Use the WSL 2 based engine'")
-			fmt.Println("    4. Restart Docker Desktop and try again")
-			fmt.Println()
-			fmt.Println("  Option 2: Run this installer inside WSL")
-			fmt.Println("    1. Open WSL terminal (wsl.exe)")
-			fmt.Println("    2. Download the Linux version of the installer")
-			fmt.Println("    3. Run the installer from within WSL")
-			fmt.Println()
-			fmt.Println("  Option 3: Use local services instead of Docker")
-			fmt.Println("    Run: .\\ragcode-installer.exe -ollama=local -qdrant=remote")
-			fmt.Println("    (Requires Ollama and Qdrant to be installed separately)")
-			fmt.Println()
-			fail("Docker CLI not available. See options above.")
-		} else {
-			fail("Docker not found. Please install Docker: https://docs.docker.com/get-docker/")
+// resolveInstallDir returns absolute path for the install directory.
+func resolveInstallDir() string {
+	dir := *installDir
+	if !filepath.IsAbs(dir) {
+		wd, err := os.Getwd()
+		if err != nil {
+			fail(fmt.Sprintf("Cannot determine working directory: %v", err))
 		}
+		dir = filepath.Join(wd, dir)
 	}
-
-	// Verify docker daemon is running
-	cmd := exec.Command("docker", "info")
-	if err := cmd.Run(); err != nil {
-		if runtime.GOOS == "windows" {
-			fmt.Println()
-			fmt.Println("Docker daemon is not running or not accessible.")
-			fmt.Println()
-			fmt.Println("Please ensure:")
-			fmt.Println("  1. Docker Desktop is running")
-			fmt.Println("  2. Docker Desktop has finished starting (check system tray)")
-			fmt.Println("  3. If using WSL2 backend, ensure WSL integration is enabled")
-			fmt.Println()
-			fail("Docker daemon not accessible. Start Docker Desktop and try again.")
-		} else {
-			fail("Docker daemon not running. Please start Docker and try again.")
-		}
-	}
-
-	success(fmt.Sprintf("Docker available at %s", dockerPath))
-}
-
-func isPortInUse(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), time.Second)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
-
-func killProcessOnPort(port int) {
-	if runtime.GOOS == "windows" {
-		// Windows: find PID and kill
-		cmd := exec.Command("cmd", "/c", fmt.Sprintf("for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :%d ^| findstr LISTENING') do taskkill /PID %%a /F", port))
-		_ = cmd.Run() // Ignore error - best effort kill
-	} else {
-		// Linux/Mac: use fuser
-		_ = exec.Command("fuser", "-k", fmt.Sprintf("%d/tcp", port)).Run() // Ignore error - best effort kill
-	}
-}
-
-// stopRunningServers stops any running rag-code-mcp processes
-func stopRunningServers() {
-	log("Checking for running rag-code-mcp processes...")
-
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("taskkill", "/F", "/IM", "rag-code-mcp.exe")
-	} else {
-		cmd = exec.Command("pkill", "-f", "rag-code-mcp")
-	}
-
-	err := cmd.Run()
-	if err == nil {
-		success("Stopped running MCP server processes")
-		time.Sleep(500 * time.Millisecond) // Give processes time to clean up
-	} else {
-		// Not an error if no processes found - just means nothing was running
-		log("No running MCP server processes found (this is normal)")
-	}
-}
-
-func freeRequiredPorts() {
-	ports := map[int]string{}
-
-	if *ollamaMode == "docker" {
-		ports[11434] = "Ollama"
-	}
-	if *qdrantMode == "docker" {
-		ports[6333] = "Qdrant"
-	}
-
-	for port, name := range ports {
-		if isPortInUse(port) {
-			// 1. Check if it's already our named container (shorthand check)
-			containerName := ""
-			if port == 11434 {
-				containerName = ollamaContainer
-			} else if port == 6333 {
-				containerName = qdrantContainer
-			}
-
-			if containerName != "" {
-				cmd := exec.Command("docker", "ps", "--filter", "name="+containerName, "--filter", "status=running", "--format", "{{.Names}}")
-				output, _ := cmd.CombinedOutput()
-				if strings.Contains(string(output), containerName) {
-					success(fmt.Sprintf("Service %s (%s) is already running in Docker", name, containerName))
-					continue
-				}
-			}
-
-			// 2. Check if it's already the service we want responding on the port
-			isOurs := false
-			client := &http.Client{Timeout: 2 * time.Second}
-			switch port {
-			case 11434:
-				resp, err := client.Get("http://127.0.0.1:11434/api/tags")
-				if err == nil {
-					resp.Body.Close()
-					isOurs = true
-				}
-			case 6333:
-				// Qdrant check
-				resp, err := client.Get("http://127.0.0.1:6333/readyz")
-				if err == nil {
-					resp.Body.Close()
-					isOurs = true
-				}
-			}
-
-			if isOurs {
-				success(fmt.Sprintf("Service %s is already running on port %d", name, port))
-				continue
-			}
-
-			// 3. It's an unknown process, try to kill it
-			log(fmt.Sprintf("Port %d (%s) is in use by an unknown process. Trying to free it...", port, name))
-			killProcessOnPort(port)
-			time.Sleep(1 * time.Second)
-
-			if isPortInUse(port) {
-				fail(fmt.Sprintf("Could not free port %d (%s). Please stop the process manually.", port, name))
-			}
-		}
-	}
+	return filepath.Clean(dir)
 }
 
 func main() {
 	flag.Parse()
 
+	dir := resolveInstallDir()
+
 	if *uninstallFlag {
-		runUninstall()
+		runUninstall(dir)
 		return
 	}
 
 	printBanner()
 
 	if *upgradeFlag {
-		log("Upgrading RagCode MCP Server...")
+		log("Upgrading RagCode...")
 	}
 
-	// 0. Check Docker availability if needed
+	// 0. Docker check
 	if *ollamaMode == "docker" || *qdrantMode == "docker" {
 		checkDockerAvailable()
 		freeRequiredPorts()
 	}
 
-	// 1. Build and Install Binary
-	if !*skipBuild {
-		installBinary()
-	} else {
-		log("Skipping rag-code-mcp binary install (--skip-build)")
-	}
-	installRuntimeBinaries()
+	// 1. Build / download binaries → dir/bin/
+	installBinaries(dir)
 
-	// 2. Setup Services (Docker or Local)
+	// 2. Install PHP bridge → dir/php-bridge/
+	installPHPBridge(dir)
+
+	// 3. Create default config → dir/config.yaml
+	installConfig(dir)
+
+	// 4. Setup services (Docker containers)
 	setupServices()
 
-	// 3. Provision Models (Auto-download)
+	// 5. Pull models
 	provisionModels()
 
-	// 4. Configure IDEs
-	configureIDEs(parseIDESelections(*idesFlag))
+	// 6. Configure IDEs
+	configureIDEs(dir, parseIDESelections(*idesFlag))
 
-	// 5. Run health validation
-	runHealthCheck()
+	// 7. Health check
+	runHealthCheck(dir)
 
-	printSummary()
+	printSummary(dir)
 }
 
-func runUninstall() {
-	log("Starting uninstallation process...")
+// ─── Step 1: Binaries ──────────────────────────────────────────────────────────
 
-	// 1. Stop and remove Docker containers
-	if commandExists("docker") {
-		log("Cleaning up Docker containers...")
-		_ = exec.Command("docker", "stop", ollamaContainer, qdrantContainer).Run()
-		_ = exec.Command("docker", "rm", ollamaContainer, qdrantContainer).Run()
-	}
-
-	home, _ := os.UserHomeDir()
-
-	// 2. Remove configuration from IDEs
-	log("Removing configurations from IDEs...")
-	allIDEs := resolveIDEPaths(home)
-	for key, ide := range allIDEs {
-		removeConfigFromIDE(key, ide.path, ide.displayName)
-	}
-
-	// 3. Remove symlinks/binaries from ~/.local/bin or go/bin
-	log("Removing binaries...")
-	binaries := []string{"rag-code-mcp", "index-all", "ragcode-installer"}
-
-	var binPath string
-	if runtime.GOOS == "windows" {
-		binPath = filepath.Join(home, "go", "bin")
-	} else {
-		binPath = "/usr/local/bin" // Traditional path
-		if userBin, err := os.UserHomeDir(); err == nil {
-			userBin = filepath.Join(userBin, ".local", "bin")
-			if _, err := os.Stat(userBin); err == nil {
-				binPath = userBin
-			}
-		}
-	}
-
-	for _, bin := range binaries {
-		p := filepath.Join(binPath, bin)
-		if runtime.GOOS == "windows" {
-			p += ".exe"
-		}
-		if _, err := os.Stat(p); err == nil {
-			os.Remove(p)
-			log(fmt.Sprintf("Removed %s", p))
-		}
-	}
-
-	// 4. Remove runtime binaries and metadata
-	log("Removing application files...")
-	installDir := filepath.Join(home, installDirName)
-	os.RemoveAll(installDir)
-
-	success("RagCode MCP has been uninstalled successfully.")
-}
-
-func commandExists(cmd string) bool {
-	_, err := exec.LookPath(cmd)
-	return err == nil
-}
-
-func removeConfigFromIDE(ideKey, path, displayName string) {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-
-	var config map[string]interface{}
-	if err := json.Unmarshal(data, &config); err != nil {
-		return
-	}
-
-	// Determine the collection key (mcpServers or mcp-servers)
-	collectionKey := "mcpServers"
-	if ideKey == "vs-code" || ideKey == "copilot" || ideKey == "cursor" {
-		// These IDEs use mcpServers
-	} else {
-		// Check if mcp-servers exists
-		if _, ok := config["mcp-servers"]; ok {
-			collectionKey = "mcp-servers"
-		}
-	}
-
-	serversRaw, ok := config[collectionKey]
-	if !ok {
-		return
-	}
-
-	servers, ok := serversRaw.(map[string]interface{})
-	if !ok {
-		return
-	}
-
-	if _, ok := servers["ragcode"]; ok {
-		delete(servers, "ragcode")
-		updated, _ := json.MarshalIndent(config, "", "  ")
-		if err := os.WriteFile(path, updated, 0644); err != nil {
-			warn(fmt.Sprintf("Failed to write updated config to %s: %v", path, err))
-		} else {
-			log(fmt.Sprintf("Removed config from %s", displayName))
-		}
-	}
-}
-
-func printBanner() {
-	fmt.Println(`
-    ____              ______          __   
-   / __ \____ _____ _/ ____/___  ____/ /__ 
-  / /_/ / __ '/ __ '/ /   / __ \/ __  / _ \
- / _, _/ /_/ / /_/ / /___/ /_/ / /_/ /  __/
-/_/ |_|\__,_/\__, /\____/\____/\__,_/\___/ 
-            /____/                         
-   Universal Installer
-	`)
-}
-
-// --- Step 1: Binary Installation ---
-
-func installBinary() {
-	log("Installing RagCode binary...")
-
-	// Stop any running servers before attempting to replace binary
-	stopRunningServers()
-
-	// Determine install path
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fail(fmt.Sprintf("Could not determine user home directory: %v", err))
-	}
-	var binDir string
-	if runtime.GOOS == "windows" {
-		binDir = filepath.Join(home, ".local", "share", "ragcode", "bin")
-	} else {
-		binDir = filepath.Join(home, ".local", "share", "ragcode", "bin")
-	}
+func installBinaries(dir string) {
+	binDir := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
-		fail(fmt.Sprintf("Could not create bin directory: %v", err))
+		fail(fmt.Sprintf("Cannot create %s: %v", binDir, err))
 	}
 
-	binaryName := "rag-code-mcp"
-	if runtime.GOOS == "windows" {
-		binaryName += ".exe"
+	binaries := []struct {
+		name string
+		pkg  string
+	}{
+		{"rag-code-mcp", "./cmd/rag-code-mcp"},
+		{"index-all", "./cmd/index-all"},
 	}
-	outputBin := filepath.Join(binDir, binaryName)
 
-	// Option 1: Check if binary exists in current directory (from extracted archive)
-	if _, err := os.Stat(binaryName); err == nil {
-		log(fmt.Sprintf("Found %s in current directory, copying to %s...", binaryName, binDir))
-		if err := copyFile(binaryName, outputBin); err != nil {
-			fail(fmt.Sprintf("Failed to copy binary: %v", err))
+	// 1. Check if pre-built binaries exist in CWD (extracted from release archive)
+	allFound := true
+	for _, bin := range binaries {
+		name := bin.name
+		if runtime.GOOS == "windows" {
+			name += ".exe"
 		}
-		if err := os.Chmod(outputBin, 0755); err != nil {
-			warn(fmt.Sprintf("Could not set executable flag: %v", err))
+		if _, err := os.Stat(name); err != nil {
+			allFound = false
+			break
 		}
-		success("Binary installed successfully")
-		addToPath(binDir)
-		return
 	}
-
-	// Option 2: Try downloading pre-built archive
-	if downloadAndExtractBinary(outputBin) {
-		success("Binary downloaded and installed successfully")
-		addToPath(binDir)
-		return
-	}
-
-	// Option 3: Fallback to local build if source is present
-	warn("Download failed – attempting local build from source.")
-	if _, err := os.Stat("./cmd/rag-code-mcp"); err != nil {
-		fail("Binary not found. Please download the release archive from:\nhttps://github.com/doITmagic/rag-code-mcp/releases/latest")
-	}
-	cmd := exec.Command("go", "build", "-o", outputBin, "./cmd/rag-code-mcp")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	log(fmt.Sprintf("Compiling to %s...", outputBin))
-	if err := cmd.Run(); err != nil {
-		fail(fmt.Sprintf("Local build failed: %v", err))
-	}
-	success("Binary built successfully")
-	addToPath(binDir)
-}
-
-// copyFile copies a file from src to dst
-func copyFile(src, dst string) error {
-	sourceFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer sourceFile.Close()
-
-	destFile, err := os.Create(dst)
-	if err != nil {
-		// If "text file busy", try to move the existing file aside
-		if strings.Contains(err.Error(), "text file busy") {
-			oldPath := dst + ".old-" + time.Now().Format("20060102-150405")
-			if renameErr := os.Rename(dst, oldPath); renameErr == nil {
-				// Try creating again
-				destFile, err = os.Create(dst)
-				if err != nil {
-					return err
-				}
-			} else {
-				return fmt.Errorf("could not move existing file %s: %v", dst, renameErr)
+	if allFound {
+		log("Copying pre-built binaries from current directory...")
+		for _, bin := range binaries {
+			name := bin.name
+			if runtime.GOOS == "windows" {
+				name += ".exe"
 			}
-		} else {
-			return err
+			if err := copyFile(name, filepath.Join(binDir, name)); err != nil {
+				fail(fmt.Sprintf("Failed to copy %s: %v", name, err))
+			}
+			_ = os.Chmod(filepath.Join(binDir, name), 0755)
+			success(fmt.Sprintf("Installed %s", name))
 		}
+		return
 	}
-	defer destFile.Close()
 
-	_, err = io.Copy(destFile, sourceFile)
-	return err
+	if *skipBuild {
+		// Try downloading pre-built release
+		if downloadRelease(binDir) {
+			return
+		}
+		warn("Download failed, falling back to build from source.")
+	}
+
+	// 2. Build from source if go.mod is present
+	if _, err := os.Stat("go.mod"); err == nil {
+		log("Building from source...")
+		for _, bin := range binaries {
+			outName := bin.name
+			if runtime.GOOS == "windows" {
+				outName += ".exe"
+			}
+			output := filepath.Join(binDir, outName)
+			cmd := exec.Command("go", "build", "-o", output, bin.pkg)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				fail(fmt.Sprintf("Failed to build %s: %v", bin.name, err))
+			}
+			_ = os.Chmod(output, 0755)
+			success(fmt.Sprintf("Built %s", outName))
+		}
+		return
+	}
+
+	// 3. Last resort: download from GitHub
+	if !downloadRelease(binDir) {
+		fail("Cannot install binaries. Run from source tree, from extracted release, or ensure GitHub releases are available.")
+	}
 }
 
-// downloadAndExtractBinary fetches the release archive and extracts the binary.
-func downloadAndExtractBinary(dest string) bool {
+func downloadRelease(binDir string) bool {
 	var archiveName string
 	arch := runtime.GOARCH
 	switch runtime.GOOS {
@@ -608,212 +216,217 @@ func downloadAndExtractBinary(dest string) bool {
 	default:
 		return false
 	}
-	url := fmt.Sprintf("https://github.com/doITmagic/rag-code-mcp/releases/latest/download/%s", archiveName)
-	log(fmt.Sprintf("Downloading from %s...", url))
+
+	url := fmt.Sprintf("%s/releases/latest/download/%s", repoURL, archiveName)
+	log(fmt.Sprintf("Downloading %s...", url))
 
 	resp, err := http.Get(url)
-	if err != nil {
-		warn(fmt.Sprintf("Failed to download: %v", err))
+	if err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		warn("Release download failed.")
 		return false
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		if resp.StatusCode == 404 {
-			warn("Release not found (404). Skipping download.")
-		} else {
-			warn(fmt.Sprintf("Download failed with status %d", resp.StatusCode))
-		}
-		return false
-	}
-
-	// Create temp file for archive
 	tmpFile, err := os.CreateTemp("", "ragcode-*.tar.gz")
 	if err != nil {
-		warn(fmt.Sprintf("Could not create temp file: %v", err))
 		return false
 	}
 	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
 
 	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
-		warn(fmt.Sprintf("Error downloading archive: %v", err))
+		tmpFile.Close()
 		return false
 	}
 	tmpFile.Close()
 
-	// Extract binary from archive
-	binaryName := "rag-code-mcp"
-	if runtime.GOOS == "windows" {
-		binaryName += ".exe"
-	}
-
-	if runtime.GOOS == "windows" {
-		// Handle zip for Windows
-		warn("Windows archive extraction not yet implemented")
-		return false
-	}
-
-	// Extract tar.gz
-	cmd := exec.Command("tar", "-xzf", tmpFile.Name(), "-O", binaryName)
-	outFile, err := os.Create(dest)
-	if err != nil {
-		warn(fmt.Sprintf("Could not create destination file: %v", err))
-		return false
-	}
-	defer outFile.Close()
-	cmd.Stdout = outFile
-
+	// Extract to binDir
+	cmd := exec.Command("tar", "-xzf", tmpFile.Name(), "-C", binDir)
 	if err := cmd.Run(); err != nil {
-		warn(fmt.Sprintf("Failed to extract binary: %v", err))
+		warn(fmt.Sprintf("Failed to extract archive: %v", err))
 		return false
 	}
 
-	if err := os.Chmod(dest, 0755); err != nil {
-		warn(fmt.Sprintf("Could not set executable flag: %v", err))
-	}
+	success("Downloaded and extracted release binaries")
 	return true
 }
 
-func addToPath(binDir string) {
-	path := os.Getenv("PATH")
-	if strings.Contains(path, binDir) {
-		return
-	}
+// ─── Step 2: PHP Bridge ────────────────────────────────────────────────────────
 
-	log("Adding binary to PATH...")
+func installPHPBridge(dir string) {
+	bridgeDir := filepath.Join(dir, "php-bridge")
 
-	var shellConfig string
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fail(fmt.Sprintf("Could not determine user home directory: %v", err))
-	}
-
-	switch filepath.Base(os.Getenv("SHELL")) {
-	case "zsh":
-		shellConfig = filepath.Join(home, ".zshrc")
-	case "bash":
-		shellConfig = filepath.Join(home, ".bashrc")
-	default:
-		if runtime.GOOS == "windows" {
-			warn("Please add " + binDir + " to your PATH manually.")
-			return
+	// Check if source php-bridge/ exists (running from source tree)
+	if _, err := os.Stat("php-bridge/parse.php"); err == nil {
+		log("Installing PHP bridge from source tree...")
+		if err := os.RemoveAll(bridgeDir); err != nil && !os.IsNotExist(err) {
+			fail(fmt.Sprintf("Cannot clean %s: %v", bridgeDir, err))
 		}
-		shellConfig = filepath.Join(home, ".profile")
+		if err := copyDir("php-bridge", bridgeDir); err != nil {
+			fail(fmt.Sprintf("Failed to copy php-bridge: %v", err))
+		}
+	} else if _, err := os.Stat(filepath.Join(bridgeDir, "parse.php")); err != nil {
+		// Not in source tree and no existing bridge — clone just the php-bridge
+		log("Cloning PHP bridge from repository...")
+		tmpDir, err := os.MkdirTemp("", "ragcode-clone-*")
+		if err != nil {
+			fail(fmt.Sprintf("Cannot create temp dir: %v", err))
+		}
+		defer os.RemoveAll(tmpDir)
+
+		cmd := exec.Command("git", "clone", "--depth", "1", "--filter=blob:none", "--sparse",
+			repoURL+".git", tmpDir)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			fail(fmt.Sprintf("Failed to clone repo: %v", err))
+		}
+
+		sparseCmd := exec.Command("git", "-C", tmpDir, "sparse-checkout", "set", "php-bridge")
+		if err := sparseCmd.Run(); err != nil {
+			fail(fmt.Sprintf("Failed to sparse-checkout: %v", err))
+		}
+
+		if err := copyDir(filepath.Join(tmpDir, "php-bridge"), bridgeDir); err != nil {
+			fail(fmt.Sprintf("Failed to copy php-bridge: %v", err))
+		}
+	} else {
+		log("PHP bridge already exists, skipping copy.")
 	}
 
-	f, err := os.OpenFile(shellConfig, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		warn(fmt.Sprintf("Could not update shell config: %v", err))
+	// Run composer install
+	if !commandExists("composer") {
+		warn("Composer not found. Install it: https://getcomposer.org/download/")
+		warn("Then run: cd " + bridgeDir + " && composer install --no-dev")
 		return
 	}
-	defer f.Close()
-
-	if _, err := f.WriteString(fmt.Sprintf("\nexport PATH=\"%s:$PATH\"\n", binDir)); err != nil {
-		warn(fmt.Sprintf("Could not write to shell config: %v", err))
-	} else {
-		success(fmt.Sprintf("Added to %s (restart shell to apply)", shellConfig))
+	if !commandExists("php") {
+		warn("PHP CLI not found. Install PHP 8.1+.")
+		warn("Then run: cd " + bridgeDir + " && composer install --no-dev")
+		return
 	}
+
+	log("Running composer install...")
+	cmd := exec.Command("composer", "install", "--no-dev", "--optimize-autoloader", "--quiet")
+	cmd.Dir = bridgeDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		warn(fmt.Sprintf("Composer install failed: %v. Run manually: cd %s && composer install --no-dev", err, bridgeDir))
+		return
+	}
+	success("PHP bridge installed (nikic/php-parser)")
 }
 
-// --- Step 2: Service Orchestration ---
+// ─── Step 3: Config ────────────────────────────────────────────────────────────
+
+func installConfig(dir string) {
+	configPath := filepath.Join(dir, "config.yaml")
+	if _, err := os.Stat(configPath); err == nil {
+		log("Config exists, skipping: " + configPath)
+		return
+	}
+
+	log("Creating default config.yaml...")
+	config := `llm:
+  provider: ollama
+  ollama_base_url: http://localhost:11434
+  ollama_model: ` + defaultModel + `
+  ollama_embed: ` + defaultEmbed + `
+  temperature: 0.7
+  max_tokens: 1024
+  timeout: 60s
+  max_retries: 3
+
+storage:
+  vector_db:
+    url: http://localhost:6333
+    api_key: ""
+
+logging:
+  level: info
+  format: text
+  output: file
+  path: ragcode.log
+
+rag_code:
+  enabled: true
+  index_on_startup: false
+
+workspace:
+  enabled: true
+  auto_index: false
+  max_workspaces: 10
+  detection_markers:
+    - composer.json
+  collection_prefix: ragcode
+  index_include: []
+  index_exclude:
+    - vendor
+    - node_modules
+    - .git
+    - docker
+    - docs
+  exclude_patterns:
+    - "*.generated.php"
+    - "*.cache.php"
+`
+	if err := os.WriteFile(configPath, []byte(config), 0644); err != nil {
+		fail(fmt.Sprintf("Cannot write config: %v", err))
+	}
+	success("Created " + configPath)
+}
+
+// ─── Step 4: Services ──────────────────────────────────────────────────────────
 
 func setupServices() {
 	log("Configuring services...")
-
 	client := &http.Client{Timeout: 2 * time.Second}
 
-	// Setup Qdrant
+	// Qdrant
 	qdrantReady := false
-	resp, err := client.Get("http://127.0.0.1:6333/readyz")
-	if err == nil {
+	if resp, err := client.Get("http://127.0.0.1:6333/readyz"); err == nil {
 		resp.Body.Close()
 		qdrantReady = true
-		success("Qdrant detected and responding on port 6333 - using existing instance")
+		success("Qdrant already running on port 6333")
 	}
-
 	if !qdrantReady && *qdrantMode == "docker" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			fail(fmt.Sprintf("Could not determine user home directory: %v", err))
-		}
-		dataDir := filepath.Join(home, ".local", "share", "qdrant")
-		if err := os.MkdirAll(dataDir, 0755); err != nil {
-			fail(fmt.Sprintf("Could not create Qdrant data dir: %v", err))
-		}
-
-		qdrantArgs := []string{
-			"-p", "6333:6333",
-			"-p", "6334:6334",
-			"-v", fmt.Sprintf("%s:/qdrant/storage", dataDir),
-		}
-		startDockerContainer(qdrantContainer, qdrantImage, qdrantArgs, nil)
-	} else if !qdrantReady {
-		log("Using remote/local Qdrant (skipping Docker setup)")
+		startDockerContainer(qdrantContainer, qdrantImage,
+			[]string{"-p", "6333:6333", "-p", "6334:6334", "-v", "ragcode_qdrant_data:/qdrant/storage"}, nil)
 	}
 
-	// Setup Ollama
+	// Ollama
 	ollamaReady := false
-	resp, err = client.Get("http://127.0.0.1:11434/api/tags")
-	if err == nil {
+	if resp, err := client.Get("http://127.0.0.1:11434/api/tags"); err == nil {
 		resp.Body.Close()
 		ollamaReady = true
-		success("Ollama detected and responding on port 11434 - using existing instance")
+		success("Ollama already running on port 11434")
 	}
-
 	if !ollamaReady && *ollamaMode == "docker" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			fail(fmt.Sprintf("Could determine user home directory: %v", err))
-		}
-		localModels := *modelsDir
-		if localModels == "" {
-			localModels = filepath.Join(home, ".ollama")
-		}
-
-		// Ensure local models dir exists
-		if err := os.MkdirAll(localModels, 0755); err != nil {
-			fail(fmt.Sprintf("Could not create Ollama models dir: %v", err))
-		}
-
-		args := []string{
-			"-p", "11434:11434",
-			"-v", fmt.Sprintf("%s:/root/.ollama", localModels),
-			"--dns", "8.8.8.8", // Fix DNS issues in some containers
-		}
-
+		args := []string{"-p", "11434:11434", "-v", "ragcode_ollama_data:/root/.ollama"}
 		if *gpu {
 			args = append(args, "--gpus", "all")
 		}
-
 		startDockerContainer(ollamaContainer, ollamaImage, args, nil)
-	} else if !ollamaReady {
-		log("Using local Ollama service (skipping Docker setup)")
 	}
 
-	// Wait for healthchecks
 	waitForService("Ollama", "http://localhost:11434")
 	waitForService("Qdrant", "http://localhost:6333/readyz")
 }
 
-func startDockerContainer(name, image string, args []string, env []string) {
-	// Check if running
-	cmd := exec.Command("docker", "ps", "-q", "-f", "name="+name)
-	out, _ := cmd.Output()
-	if len(out) > 0 {
-		success(fmt.Sprintf("Container %s is already running", name))
+func startDockerContainer(name, image string, args, env []string) {
+	// Check if already running
+	out, _ := exec.Command("docker", "ps", "-q", "-f", "name="+name).Output()
+	if len(bytes.TrimSpace(out)) > 0 {
+		success(fmt.Sprintf("Container %s already running", name))
 		return
 	}
 
-	// Remove if exists but stopped
-	if err := exec.Command("docker", "rm", name).Run(); err != nil {
-		// ignore if container didn't exist, but log other errors
-		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
-			warn(fmt.Sprintf("Failed to remove existing container %s: %v", name, err))
-		}
-	}
+	// Remove stopped container
+	_ = exec.Command("docker", "rm", name).Run()
 
-	// Run
 	runArgs := []string{"run", "-d", "--name", name, "--restart", "unless-stopped"}
 	runArgs = append(runArgs, args...)
 	for _, e := range env {
@@ -821,7 +434,7 @@ func startDockerContainer(name, image string, args []string, env []string) {
 	}
 	runArgs = append(runArgs, image)
 
-	log(fmt.Sprintf("Starting container %s...", name))
+	log(fmt.Sprintf("Starting %s...", name))
 	if err := exec.Command("docker", runArgs...).Run(); err != nil {
 		fail(fmt.Sprintf("Failed to start %s: %v", name, err))
 	}
@@ -829,21 +442,20 @@ func startDockerContainer(name, image string, args []string, env []string) {
 }
 
 func waitForService(name, url string) {
-	log(fmt.Sprintf("Waiting for %s to be ready...", name))
+	log(fmt.Sprintf("Waiting for %s...", name))
 	for i := 0; i < 30; i++ {
 		resp, err := http.Get(url)
 		if err == nil && resp.StatusCode < 500 {
-			success(fmt.Sprintf("%s is ready", name))
+			resp.Body.Close()
+			success(fmt.Sprintf("%s ready", name))
 			return
 		}
 		time.Sleep(1 * time.Second)
-		fmt.Print(".")
 	}
-	fmt.Println()
-	fail(fmt.Sprintf("%s failed to start. Check logs.", name))
+	fail(fmt.Sprintf("%s failed to start after 30s", name))
 }
 
-// --- Step 3: Model Provisioning ---
+// ─── Step 5: Models ────────────────────────────────────────────────────────────
 
 type ModelList struct {
 	Models []struct {
@@ -853,13 +465,11 @@ type ModelList struct {
 
 func provisionModels() {
 	log("Checking AI models...")
-
 	required := []string{defaultModel, defaultEmbed}
 
-	// Get installed models
 	resp, err := http.Get("http://localhost:11434/api/tags")
 	if err != nil {
-		warn("Could not connect to Ollama API to check models. Skipping provisioning.")
+		warn("Cannot reach Ollama API. Skipping model provisioning.")
 		return
 	}
 	defer resp.Body.Close()
@@ -876,7 +486,6 @@ func provisionModels() {
 	}
 
 	for _, req := range required {
-		// Check for exact match or match without tag if 'latest'
 		found := false
 		for k := range installed {
 			if strings.HasPrefix(k, req) {
@@ -884,9 +493,8 @@ func provisionModels() {
 				break
 			}
 		}
-
 		if found {
-			success(fmt.Sprintf("Model %s is present", req))
+			success(fmt.Sprintf("Model %s present", req))
 		} else {
 			pullModel(req)
 		}
@@ -894,108 +502,76 @@ func provisionModels() {
 }
 
 func pullModel(name string) {
-	log(fmt.Sprintf("Downloading model %s (this may take a while)...", name))
-
+	log(fmt.Sprintf("Pulling model %s (may take a while)...", name))
 	reqBody, _ := json.Marshal(map[string]string{"name": name})
 	resp, err := http.Post("http://localhost:11434/api/pull", "application/json", bytes.NewBuffer(reqBody))
 	if err != nil {
-		fail(fmt.Sprintf("Failed to pull model %s: %v", name, err))
+		fail(fmt.Sprintf("Failed to pull %s: %v", name, err))
 	}
 	defer resp.Body.Close()
 
 	scanner := bufio.NewScanner(resp.Body)
-	buffer := make([]byte, 0, 1024)
-	scanner.Buffer(buffer, 1024*1024)
-	var lastLine string
+	scanner.Buffer(make([]byte, 0, 1024), 1024*1024)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
-		lastLine = line
-
 		var chunk map[string]interface{}
 		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
 			continue
 		}
-
 		status, _ := chunk["status"].(string)
-		message := status
-
-		if detail, ok := chunk["detail"].(map[string]interface{}); ok {
-			if current, ok := detail["current"].(string); ok && current != "" {
-				message = current
-			}
-		} else if digest, ok := chunk["digest"].(string); ok && digest != "" && status != "" {
-			message = fmt.Sprintf("%s %s", status, digest)
-		}
-
 		percent := ""
 		if completed, ok := chunk["completed"].(float64); ok {
 			if total, ok := chunk["total"].(float64); ok && total > 0 {
-				pct := (completed / total) * 100
-				percent = fmt.Sprintf(" %.0f%%", pct)
+				percent = fmt.Sprintf(" %.0f%%", (completed/total)*100)
 			}
 		}
-
-		fmt.Printf("\r   ↳ %s%s", message, percent)
-
+		fmt.Printf("\r   ↳ %s%s", status, percent)
 		if status == "success" {
 			break
 		}
 	}
-
-	if err := scanner.Err(); err != nil {
-		warn(fmt.Sprintf("Model download stream ended with error: %v", err))
-	}
-
-	if lastLine != "" {
-		fmt.Print("\r")
-	}
 	fmt.Println()
-	success(fmt.Sprintf("Model %s downloaded", name))
+	success(fmt.Sprintf("Model %s ready", name))
 }
 
-// --- Step 4: IDE Configuration ---
+// ─── Step 6: IDE Configuration ─────────────────────────────────────────────────
 
-func configureIDEs(selected []string) {
+func configureIDEs(dir string, selected []string) {
 	log("Configuring IDEs...")
 	home, err := os.UserHomeDir()
 	if err != nil {
-		fail(fmt.Sprintf("Could not determine user home directory: %v", err))
-	}
-	paths := resolveIDEPaths(home)
-	if len(paths) == 0 {
-		warn("No known IDE paths detected")
+		warn("Cannot determine home directory, skipping IDE config")
 		return
 	}
 
-	var binPath string
+	binPath := filepath.Join(dir, "bin", "rag-code-mcp")
 	if runtime.GOOS == "windows" {
-		binPath = filepath.Join(home, "go", "bin", "rag-code-mcp.exe")
-	} else {
-		binPath = filepath.Join(home, installDirName, "bin", "rag-code-mcp")
+		binPath += ".exe"
 	}
+	configPath := filepath.Join(dir, "config.yaml")
+	bridgePath := filepath.Join(dir, "php-bridge", "parse.php")
 
+	paths := resolveIDEPaths(home)
 	selection := normalizeIdeSelection(selected)
+
 	for key, cfg := range paths {
-		shouldEnsure := selection.explicit[key]
-		if !selection.auto && !shouldEnsure {
+		shouldConfigure := selection.explicit[key]
+		if !selection.auto && !shouldConfigure {
 			continue
 		}
-		dir := filepath.Dir(cfg.path)
-		if !shouldEnsure {
-			if _, err := os.Stat(dir); err != nil {
+		cfgDir := filepath.Dir(cfg.path)
+		if !shouldConfigure {
+			if _, err := os.Stat(cfgDir); err != nil {
 				continue
 			}
 		} else {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				warn(fmt.Sprintf("Failed to create %s: %v", dir, err))
-				continue
-			}
+			_ = os.MkdirAll(cfgDir, 0755)
 		}
-		updateMCPConfig(key, cfg.displayName, cfg.path, binPath)
+		updateMCPConfig(key, cfg.displayName, cfg.path, binPath, configPath, bridgePath)
 	}
 }
 
@@ -1006,92 +582,70 @@ type idePath struct {
 
 func resolveIDEPaths(home string) map[string]idePath {
 	paths := map[string]idePath{
-		"windsurf": {
-			path:        filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"),
-			displayName: "Windsurf",
-		},
-		"cursor": {
-			path:        filepath.Join(home, ".cursor", "mcp.config.json"),
-			displayName: "Cursor",
-		},
-		"copilot": {
-			path:        filepath.Join(home, ".aitk", "mcp.json"),
-			displayName: "GitHub Copilot",
-		},
-		"antigravity": {
-			path:        filepath.Join(home, ".gemini", "antigravity", "mcp_config.json"),
-			displayName: "Antigravity",
-		},
-		"mcp-cli": {
-			path:        filepath.Join(home, ".config", "mcp-servers.json"),
-			displayName: "MCP CLI / Generic",
-		},
+		"windsurf": {filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"), "Windsurf"},
+		"cursor":   {filepath.Join(home, ".cursor", "mcp.config.json"), "Cursor"},
+		"copilot":  {filepath.Join(home, ".aitk", "mcp.json"), "GitHub Copilot"},
+		"antigravity": {filepath.Join(home, ".gemini", "antigravity", "mcp_config.json"), "Antigravity"},
+		"mcp-cli":  {filepath.Join(home, ".config", "mcp-servers.json"), "MCP CLI"},
 	}
-
 	switch runtime.GOOS {
 	case "darwin":
 		paths["claude"] = idePath{filepath.Join(home, "Library", "Application Support", "Claude", "mcp-servers.json"), "Claude Desktop"}
 	case "windows":
-		appData := os.Getenv("APPDATA")
-		if appData != "" {
+		if appData := os.Getenv("APPDATA"); appData != "" {
 			paths["claude"] = idePath{filepath.Join(appData, "Claude", "mcp-servers.json"), "Claude Desktop"}
 		}
-	default: // Linux / others
+	default:
 		paths["claude"] = idePath{filepath.Join(home, ".config", "Claude", "mcp-servers.json"), "Claude Desktop"}
 	}
-
 	if vsPath, ok := determineVSCodePath(home); ok {
 		paths["vs-code"] = vsPath
 	}
-
 	return paths
-}
-
-type ideSelection struct {
-	auto     bool
-	explicit map[string]bool
 }
 
 func determineVSCodePath(home string) (idePath, bool) {
 	var userDir string
 	switch runtime.GOOS {
 	case "windows":
-		appData := os.Getenv("APPDATA")
-		if appData == "" {
+		if appData := os.Getenv("APPDATA"); appData != "" {
+			userDir = filepath.Join(appData, "Code", "User")
+		} else {
 			return idePath{}, false
 		}
-		userDir = filepath.Join(appData, "Code", "User")
 	case "darwin":
 		userDir = filepath.Join(home, "Library", "Application Support", "Code", "User")
 	default:
 		userDir = filepath.Join(home, ".config", "Code", "User")
 	}
-
 	newPath := filepath.Join(userDir, "mcp.json")
 	legacyPath := filepath.Join(userDir, "globalStorage", "mcp-servers.json")
 	chosen := newPath
 	if _, err := os.Stat(newPath); os.IsNotExist(err) {
-		if _, legacyErr := os.Stat(legacyPath); legacyErr == nil {
+		if _, err := os.Stat(legacyPath); err == nil {
 			chosen = legacyPath
 		}
 	}
-
-	return idePath{path: chosen, displayName: "VS Code"}, true
+	return idePath{chosen, "VS Code"}, true
 }
 
 func parseIDESelections(raw string) []string {
 	if raw == "" {
 		return nil
 	}
-	parts := strings.Split(raw, ",")
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
+	var result []string
+	for _, part := range strings.Split(raw, ",") {
 		part = strings.ToLower(strings.TrimSpace(part))
 		if part != "" {
 			result = append(result, part)
 		}
 	}
 	return result
+}
+
+type ideSelection struct {
+	auto     bool
+	explicit map[string]bool
 }
 
 func normalizeIdeSelection(selected []string) ideSelection {
@@ -1102,9 +656,9 @@ func normalizeIdeSelection(selected []string) ideSelection {
 	for _, item := range selected {
 		if item == "auto" {
 			sel.auto = true
-			continue
+		} else {
+			sel.explicit[item] = true
 		}
-		sel.explicit[item] = true
 	}
 	if len(sel.explicit) == 0 {
 		sel.auto = true
@@ -1112,14 +666,10 @@ func normalizeIdeSelection(selected []string) ideSelection {
 	return sel
 }
 
-func updateMCPConfig(ideKey, displayName, path, binPath string) {
+func updateMCPConfig(ideKey, displayName, path, binPath, configPath, bridgePath string) {
 	config := make(map[string]interface{})
-
-	// Read existing
 	if data, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(data, &config); err != nil {
-			warn(fmt.Sprintf("Failed to parse existing MCP config %s: %v", path, err))
-		}
+		_ = json.Unmarshal(data, &config)
 	}
 
 	collectionKey := "mcpServers"
@@ -1132,82 +682,257 @@ func updateMCPConfig(ideKey, displayName, path, binPath string) {
 		servers = existing
 	}
 
-	// Migration: Clean up legacy server keys
-	legacyKeys := []string{"coderag", "do-ai", "ragcond"}
-	for _, lk := range legacyKeys {
-		if _, exists := servers[lk]; exists {
-			delete(servers, lk)
-			log(fmt.Sprintf("Migrating legacy config: removed %s", lk))
-		}
+	// Clean up legacy keys
+	for _, lk := range []string{"coderag", "do-ai", "ragcond"} {
+		delete(servers, lk)
 	}
 
-	servers["ragcode"] = buildMCPServerEntry(ideKey, binPath)
-	config[collectionKey] = servers
-
-	data, _ := json.MarshalIndent(config, "", "  ")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err == nil {
-		if err := os.WriteFile(path, data, 0644); err == nil {
-			success(fmt.Sprintf("Configured %s", displayName))
-		}
-	}
-}
-
-func buildMCPServerEntry(ideKey, binPath string) map[string]interface{} {
-	// default json for ide's cursor , antigravity , claude
 	entry := map[string]interface{}{
 		"command": binPath,
-		"args":    []string{},
+		"args":    []string{"-config", configPath},
 		"env": map[string]string{
-			"OLLAMA_BASE_URL": "http://localhost:11434",
-			"OLLAMA_MODEL":    defaultModel,
-			"OLLAMA_EMBED":    defaultEmbed,
-			"QDRANT_URL":      "http://localhost:6333",
+			"RAGCODE_PHP_BRIDGE": bridgePath,
 		},
 	}
 
-	// add specific fields for each ide
-	switch ideKey {
-	case "vs-code", "copilot":
+	if ideKey == "vs-code" || ideKey == "copilot" {
 		entry["alwaysAllow"] = []string{
-			"search_code",
-			"search_local_index",
-			"get_function_details",
-			"find_type_definition",
-			"get_code_context",
-			"list_package_exports",
-			"find_implementations",
-			"search_docs",
-			"hybrid_search",
-			"index_workspace",
+			"search_code", "search_local_index", "get_function_details",
+			"find_type_definition", "get_code_context", "list_package_exports",
+			"find_implementations", "search_docs", "hybrid_search", "index_workspace",
 		}
-	case "windsurf":
+	}
+	if ideKey == "windsurf" {
 		entry["disabled"] = false
-	default:
-		// Other IDEs currently don't need extra fields
 	}
 
-	return entry
+	servers["ragcode"] = entry
+	config[collectionKey] = servers
+
+	data, _ := json.MarshalIndent(config, "", "  ")
+	_ = os.MkdirAll(filepath.Dir(path), 0755)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		warn(fmt.Sprintf("Failed to write %s: %v", path, err))
+	} else {
+		success(fmt.Sprintf("Configured %s", displayName))
+	}
 }
 
-func printSummary() {
-	fmt.Println("\n" + green + "Installation Complete! 🚀" + reset)
+// ─── Step 7: Health Check ──────────────────────────────────────────────────────
+
+func runHealthCheck(dir string) {
+	log("Running health check...")
+	binPath := filepath.Join(dir, "bin", "rag-code-mcp")
+	if runtime.GOOS == "windows" {
+		binPath += ".exe"
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		warn("Binary not found, skipping health check")
+		return
+	}
+
+	cmd := exec.Command(binPath, "--health")
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		warn("Health check reported issues. Run manually: " + binPath + " --health")
+	} else {
+		success("Health check passed")
+	}
+}
+
+// ─── Uninstall ─────────────────────────────────────────────────────────────────
+
+func runUninstall(dir string) {
+	log("Uninstalling RagCode from " + dir + "...")
+
+	// Stop Docker containers
+	if commandExists("docker") {
+		_ = exec.Command("docker", "stop", ollamaContainer, qdrantContainer).Run()
+		_ = exec.Command("docker", "rm", ollamaContainer, qdrantContainer).Run()
+		success("Docker containers removed")
+	}
+
+	// Remove IDE configs
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		for key, ide := range resolveIDEPaths(home) {
+			removeConfigFromIDE(key, ide.path, ide.displayName)
+		}
+	}
+
+	// Remove install directory
+	if err := os.RemoveAll(dir); err != nil {
+		warn(fmt.Sprintf("Could not remove %s: %v", dir, err))
+	} else {
+		success("Removed " + dir)
+	}
+
+	success("RagCode uninstalled.")
+}
+
+func removeConfigFromIDE(ideKey, path, displayName string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return
+	}
+
+	collectionKey := "mcpServers"
+	if ideKey == "vs-code" || ideKey == "copilot" {
+		collectionKey = "servers"
+	}
+	if _, ok := config["mcp-servers"]; ok {
+		collectionKey = "mcp-servers"
+	}
+
+	servers, ok := config[collectionKey].(map[string]interface{})
+	if !ok {
+		return
+	}
+	if _, ok := servers["ragcode"]; ok {
+		delete(servers, "ragcode")
+		updated, _ := json.MarshalIndent(config, "", "  ")
+		if err := os.WriteFile(path, updated, 0644); err == nil {
+			log(fmt.Sprintf("Removed config from %s", displayName))
+		}
+	}
+}
+
+// ─── Docker checks ─────────────────────────────────────────────────────────────
+
+func checkDockerAvailable() {
+	log("Checking Docker...")
+	if !commandExists("docker") {
+		fail("Docker not found. Install Docker: https://docs.docker.com/get-docker/")
+	}
+	if err := exec.Command("docker", "info").Run(); err != nil {
+		fail("Docker daemon not running. Start Docker and try again.")
+	}
+	success("Docker available")
+}
+
+func isPortInUse(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+func freeRequiredPorts() {
+	ports := map[int]string{}
+	if *ollamaMode == "docker" {
+		ports[11434] = "Ollama"
+	}
+	if *qdrantMode == "docker" {
+		ports[6333] = "Qdrant"
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	for port, name := range ports {
+		if !isPortInUse(port) {
+			continue
+		}
+		// Check if it's our container
+		containerName := qdrantContainer
+		if port == 11434 {
+			containerName = ollamaContainer
+		}
+		out, _ := exec.Command("docker", "ps", "--filter", "name="+containerName, "--filter", "status=running", "--format", "{{.Names}}").Output()
+		if strings.Contains(string(out), containerName) {
+			success(fmt.Sprintf("%s already running in Docker", name))
+			continue
+		}
+		// Check if the expected service is responding
+		var checkURL string
+		if port == 11434 {
+			checkURL = "http://127.0.0.1:11434/api/tags"
+		} else {
+			checkURL = "http://127.0.0.1:6333/readyz"
+		}
+		if resp, err := client.Get(checkURL); err == nil {
+			resp.Body.Close()
+			success(fmt.Sprintf("%s already running on port %d", name, port))
+			continue
+		}
+		fail(fmt.Sprintf("Port %d (%s) is in use by an unknown process. Free it and try again.", port, name))
+	}
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────────────
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		target := filepath.Join(dst, rel)
+
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		return copyFile(path, target)
+	})
+}
+
+// ─── Banner & Summary ──────────────────────────────────────────────────────────
+
+func printBanner() {
+	fmt.Println(`
+    ____              ______          __
+   / __ \____ _____ _/ ____/___  ____/ /__
+  / /_/ / __ '/ __ '/ /   / __ \/ __  / _ \
+ / _, _/ /_/ / /_/ / /___/ /_/ / /_/ /  __/
+/_/ |_|\__,_/\__, /\____/\____/\__,_/\___/
+            /____/
+   Local Installer`)
+}
+
+func printSummary(dir string) {
+	binPath := filepath.Join(dir, "bin", "rag-code-mcp")
+	configPath := filepath.Join(dir, "config.yaml")
+	bridgePath := filepath.Join(dir, "php-bridge", "parse.php")
+
+	fmt.Printf("\n%sInstallation Complete!%s\n", green, reset)
 	fmt.Println("────────────────────────────────────────────")
-	fmt.Println("RagCode MCP Server is running and configured.")
-	fmt.Println("\nTry it in your IDE:")
-	fmt.Println("  - VS Code: Open Copilot Chat and type '@ragcode'")
-	fmt.Println("  - Claude:  Enable MCP in settings")
-	fmt.Println("  - Cursor:  Check MCP settings")
-	fmt.Println("\n💡 First Time Setup - Index Your Workspace:")
-	fmt.Println("   After opening your IDE, ask the AI to index your project:")
-	fmt.Println("")
-	fmt.Println("   Suggested AI Prompt:")
-	fmt.Println("   Please use the RagCode MCP tool 'index_workspace' to index this project for semantic code search.")
-	fmt.Println("   Provide the file_path parameter pointing to any file in this workspace. Once indexing completes, I'll be")
-	fmt.Println("   able to use search_code, get_function_details, and other tools to help you navigate and understand the codebase.")
-	fmt.Println("")
-	fmt.Println("   Note: Indexing runs in the background and may take a few minutes depending on project size.")
-	fmt.Println("   You can start using search immediately - results will improve as indexing progresses.")
-	fmt.Println("")
-	fmt.Println("   Repeat this for each project you want to work with.")
-	fmt.Println("\nTo troubleshoot, run: rag-code-mcp")
+	fmt.Printf("  Directory:  %s\n", dir)
+	fmt.Printf("  Binary:     %s\n", binPath)
+	fmt.Printf("  Config:     %s\n", configPath)
+	fmt.Printf("  PHP Bridge: %s\n", bridgePath)
+	fmt.Println()
+	fmt.Println("MCP server entry for .mcp.json:")
+	fmt.Printf(`  {
+    "ragcode": {
+      "command": "%s",
+      "args": ["-config", "%s"],
+      "env": { "RAGCODE_PHP_BRIDGE": "%s" }
+    }
+  }
+`, binPath, configPath, bridgePath)
+	fmt.Println()
+	fmt.Println("Next: open your IDE and ask AI to index_workspace.")
 }

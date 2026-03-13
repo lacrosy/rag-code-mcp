@@ -3,9 +3,7 @@ module github.com/doITmagic/rag-code-mcp
 go 1.24.4
 
 require (
-	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/PuerkitoBio/goquery v1.10.0
-	github.com/VKCOM/php-parser v0.8.2
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/modelcontextprotocol/go-sdk v1.1.0
 	github.com/qdrant/go-client v1.15.2

@@ -6,7 +6,7 @@ import (
 	"github.com/doITmagic/rag-code-mcp/internal/codetypes"
 	"github.com/doITmagic/rag-code-mcp/internal/ragcode/analyzers/golang"
 	htmlanalyzer "github.com/doITmagic/rag-code-mcp/internal/ragcode/analyzers/html"
-	"github.com/doITmagic/rag-code-mcp/internal/ragcode/analyzers/php/laravel"
+	"github.com/doITmagic/rag-code-mcp/internal/ragcode/analyzers/php"
 	"github.com/doITmagic/rag-code-mcp/internal/ragcode/analyzers/python"
 )
 
@@ -37,7 +37,7 @@ func normalizeProjectType(projectType string) Language {
 	switch pt {
 	case "", "go", "unknown":
 		return LanguageGo
-	case "php", "php-laravel", "laravel":
+	case "php", "php-symfony", "symfony":
 		return LanguagePHP
 	case "html", "web", "static-html":
 		return LanguageHTML
@@ -60,7 +60,7 @@ func (m *AnalyzerManager) CodeAnalyzerForProjectType(projectType string) codetyp
 	case LanguageGo:
 		return golang.NewCodeAnalyzer()
 	case LanguagePHP:
-		return laravel.NewAdapter()
+		return php.NewBridgeAnalyzer()
 	case LanguageHTML:
 		return htmlanalyzer.NewCodeAnalyzer()
 	case LanguagePython:

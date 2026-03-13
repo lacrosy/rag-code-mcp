@@ -11,7 +11,6 @@ import (
 	"github.com/doITmagic/rag-code-mcp/internal/llm"
 	"github.com/doITmagic/rag-code-mcp/internal/memory"
 	"github.com/doITmagic/rag-code-mcp/internal/ragcode/analyzers/php"
-	laravel "github.com/doITmagic/rag-code-mcp/internal/ragcode/analyzers/php/laravel"
 	"github.com/doITmagic/rag-code-mcp/internal/workspace"
 )
 
@@ -389,7 +388,8 @@ func utf8DecodeRuneInString(s string) (rune, int) {
 }
 
 // buildPHPFunctionResponse builds a rich view for a PHP function or method
-// using the PHP CodeAnalyzer data (parameters, returns, flags, location).
+// using the PHP BridgeAnalyzer to re-parse the source file and extract
+// detailed parameter/return/visibility information from the resulting CodeChunks.
 //
 // outputFormat can be "markdown" (default) or "json". The JSON form returns a
 // codetypes.FunctionDescriptor encoded as JSON.
@@ -399,8 +399,10 @@ func (t *GetFunctionDetailsTool) buildPHPFunctionResponse(chunk *codetypes.CodeC
 		format = "markdown"
 	}
 
-	// Helper to build a FunctionDescriptor from MethodInfo/FunctionInfo.
-	buildDescriptor := func(methodInfo *php.MethodInfo, funcInfo *php.FunctionInfo, className, namespace string, eloquentModel *laravel.EloquentModel) codetypes.FunctionDescriptor {
+	// Helper to build a FunctionDescriptor from a matching CodeChunk produced
+	// by the BridgeAnalyzer. The matched chunk carries metadata with
+	// parameters, returns, visibility, etc.
+	buildDescriptor := func(matched *codetypes.CodeChunk, className, namespace string) codetypes.FunctionDescriptor {
 		fd := codetypes.FunctionDescriptor{
 			Language:  chunk.Language,
 			Kind:      chunk.Type,
@@ -415,114 +417,61 @@ func (t *GetFunctionDetailsTool) buildPHPFunctionResponse(chunk *codetypes.CodeC
 			Code: codeBody,
 		}
 
-		var sig string
-		if methodInfo != nil {
-			fd.Visibility = methodInfo.Visibility
-			fd.IsStatic = methodInfo.IsStatic
-			fd.IsAbstract = methodInfo.IsAbstract
-			fd.IsFinal = methodInfo.IsFinal
-			fd.Description = methodInfo.Description
-			sig = methodInfo.Signature
-			if sig == "" {
-				visibility := methodInfo.Visibility
-				if visibility == "" {
-					visibility = "public"
-				}
-				var prefixParts []string
-				if methodInfo.IsAbstract {
-					prefixParts = append(prefixParts, "abstract")
-				}
-				if methodInfo.IsFinal {
-					prefixParts = append(prefixParts, "final")
-				}
-				prefixParts = append(prefixParts, visibility)
-				if methodInfo.IsStatic {
-					prefixParts = append(prefixParts, "static")
-				}
-				prefix := strings.Join(prefixParts, " ")
-				sig = fmt.Sprintf("%s function %s()", prefix, methodInfo.Name)
-			}
-			// Parameters
-			for _, p := range methodInfo.Parameters {
-				typeStr := p.Type
-				if typeStr == "" {
-					typeStr = "mixed"
-				}
-				fd.Parameters = append(fd.Parameters, codetypes.ParamDescriptor{
-					Name: p.Name,
-					Type: typeStr,
-				})
-			}
-			// Returns
-			if len(methodInfo.Returns) > 0 {
-				for _, r := range methodInfo.Returns {
-					typeStr := r.Type
-					if typeStr == "" {
-						typeStr = "mixed"
-					}
-					fd.Returns = append(fd.Returns, codetypes.ReturnDescriptor{
-						Type:        typeStr,
-						Description: r.Description,
-						SourceHint:  "phpdoc",
-					})
-				}
-			} else if methodInfo.ReturnType != "" {
-				fd.Returns = append(fd.Returns, codetypes.ReturnDescriptor{
-					Type:       methodInfo.ReturnType,
-					SourceHint: "type_hint",
-				})
-			}
-		} else if funcInfo != nil {
-			fd.Description = funcInfo.Description
-			sig = funcInfo.Signature
-			if sig == "" {
-				sig = fmt.Sprintf("function %s()", funcInfo.Name)
-			}
-			for _, p := range funcInfo.Parameters {
-				typeStr := p.Type
-				if typeStr == "" {
-					typeStr = "mixed"
-				}
-				fd.Parameters = append(fd.Parameters, codetypes.ParamDescriptor{
-					Name: p.Name,
-					Type: typeStr,
-				})
-			}
-			if len(funcInfo.Returns) > 0 {
-				for _, r := range funcInfo.Returns {
-					typeStr := r.Type
-					if typeStr == "" {
-						typeStr = "mixed"
-					}
-					fd.Returns = append(fd.Returns, codetypes.ReturnDescriptor{
-						Type:        typeStr,
-						Description: r.Description,
-						SourceHint:  "phpdoc",
-					})
-				}
-			} else if funcInfo.ReturnType != "" {
-				fd.Returns = append(fd.Returns, codetypes.ReturnDescriptor{
-					Type:       funcInfo.ReturnType,
-					SourceHint: "type_hint",
-				})
-			}
-		} else {
-			sig = chunk.Signature
-			if sig == "" {
-				sig = fmt.Sprintf("function %s()", chunk.Name)
-			}
-			fd.Description = chunk.Docstring
+		sig := chunk.Signature
+		if sig == "" {
+			sig = fmt.Sprintf("function %s()", chunk.Name)
 		}
+		fd.Description = chunk.Docstring
 
-		// If this is an Eloquent model relation method, inject a relation return type
-		if eloquentModel != nil && methodInfo != nil {
-			if rel := findRelationForMethod(eloquentModel, methodInfo.Name); rel != nil {
-				relationType := formatRelationReturnType(rel)
-				fd.Returns = append(fd.Returns, codetypes.ReturnDescriptor{
-					Type:        relationType,
-					Description: "Laravel Eloquent relation",
-					SourceHint:  "inferred_relation",
-				})
+		if matched != nil {
+			if matched.Signature != "" {
+				sig = matched.Signature
+			}
+			if matched.Docstring != "" {
+				fd.Description = matched.Docstring
+			}
+
+			// Extract structured metadata from the bridge chunk
+			if matched.Metadata != nil {
+				if vis, ok := matched.Metadata["visibility"].(string); ok {
+					fd.Visibility = vis
+				}
+				if isStatic, ok := matched.Metadata["is_static"].(bool); ok {
+					fd.IsStatic = isStatic
+				}
+				if isAbstract, ok := matched.Metadata["is_abstract"].(bool); ok {
+					fd.IsAbstract = isAbstract
+				}
+				if isFinal, ok := matched.Metadata["is_final"].(bool); ok {
+					fd.IsFinal = isFinal
+				}
+
+				// Parameters
+				if rawParams, ok := matched.Metadata["parameters"]; ok {
+					if params, ok := rawParams.([]interface{}); ok {
+						for _, item := range params {
+							if m, ok := item.(map[string]interface{}); ok {
+								name, _ := m["name"].(string)
+								typ, _ := m["type"].(string)
+								if typ == "" {
+									typ = "mixed"
+								}
+								fd.Parameters = append(fd.Parameters, codetypes.ParamDescriptor{
+									Name: name,
+									Type: typ,
+								})
+							}
+						}
+					}
+				}
+
+				// Return type
+				if retType, ok := matched.Metadata["return_type"].(string); ok && retType != "" {
+					fd.Returns = append(fd.Returns, codetypes.ReturnDescriptor{
+						Type:       retType,
+						SourceHint: "type_hint",
+					})
+				}
 			}
 		}
 
@@ -530,24 +479,15 @@ func (t *GetFunctionDetailsTool) buildPHPFunctionResponse(chunk *codetypes.CodeC
 		return fd
 	}
 
-	// Fallback if we don't have a file path
+	// Fallback descriptor from the chunk only (no analyzer data).
+	fallbackDescriptor := func() codetypes.FunctionDescriptor {
+		return buildDescriptor(nil, "", chunk.Package)
+	}
+
+	// If we don't have a file path we cannot re-parse; use the chunk as-is.
 	if chunk.FilePath == "" {
 		if format == "json" {
-			// Minimal descriptor from the chunk only
-			desc := codetypes.FunctionDescriptor{
-				Language:    chunk.Language,
-				Kind:        chunk.Type,
-				Name:        chunk.Name,
-				Namespace:   chunk.Package,
-				Signature:   chunk.Signature,
-				Description: chunk.Docstring,
-				Location: codetypes.SymbolLocation{
-					FilePath:  chunk.FilePath,
-					StartLine: chunk.StartLine,
-					EndLine:   chunk.EndLine,
-				},
-				Code: codeBody,
-			}
+			desc := fallbackDescriptor()
 			data, err := json.MarshalIndent(desc, "", "  ")
 			if err != nil {
 				return "", fmt.Errorf("failed to marshal PHP function descriptor: %w", err)
@@ -556,24 +496,13 @@ func (t *GetFunctionDetailsTool) buildPHPFunctionResponse(chunk *codetypes.CodeC
 		}
 	}
 
-	analyzer := php.NewCodeAnalyzer()
-	if _, err := analyzer.AnalyzeFile(chunk.FilePath); err != nil {
+	// Re-analyze the source file via the PHP bridge to get richer metadata.
+	analyzer := php.NewBridgeAnalyzer()
+	bridgeChunks, err := analyzer.AnalyzePaths([]string{chunk.FilePath})
+	if err != nil || len(bridgeChunks) == 0 {
 		// Degrade gracefully to a simple representation
 		if format == "json" {
-			desc := codetypes.FunctionDescriptor{
-				Language:    chunk.Language,
-				Kind:        chunk.Type,
-				Name:        chunk.Name,
-				Namespace:   chunk.Package,
-				Signature:   chunk.Signature,
-				Description: chunk.Docstring,
-				Location: codetypes.SymbolLocation{
-					FilePath:  chunk.FilePath,
-					StartLine: chunk.StartLine,
-					EndLine:   chunk.EndLine,
-				},
-				Code: codeBody,
-			}
+			desc := fallbackDescriptor()
 			data, err2 := json.MarshalIndent(desc, "", "  ")
 			if err2 != nil {
 				return "", fmt.Errorf("failed to marshal PHP function descriptor: %w", err2)
@@ -597,100 +526,39 @@ func (t *GetFunctionDetailsTool) buildPHPFunctionResponse(chunk *codetypes.CodeC
 		return response.String(), nil
 	}
 
-	var methodInfo *php.MethodInfo
-	var funcInfo *php.FunctionInfo
+	// Find the matching chunk from the bridge output.
+	var matched *codetypes.CodeChunk
 	var className string
 	var namespace string
-	var eloquentModel *laravel.EloquentModel
 
-	// Locate the corresponding MethodInfo or FunctionInfo
-	for _, pkg := range analyzer.GetPackages() {
-		if chunk.Package != "" && pkg.Namespace != "" && pkg.Namespace != chunk.Package {
+	for i := range bridgeChunks {
+		bc := &bridgeChunks[i]
+		// Must match type (function/method) and name.
+		if bc.Type != chunk.Type || bc.Name != chunk.Name {
 			continue
 		}
-		// Methods: search in classes, interfaces, traits
-		if chunk.Type == "method" {
-			for _, cls := range pkg.Classes {
-				for i := range cls.Methods {
-					m := &cls.Methods[i]
-					if m.Name == chunk.Name {
-						if chunk.StartLine > 0 && m.StartLine > 0 && chunk.StartLine != m.StartLine {
-							continue
-						}
-						methodInfo = m
-						className = cls.Name
-						namespace = cls.Namespace
-						// Try to resolve Eloquent model for richer relation info
-						if eloquentModel == nil {
-							eloquentModel = findEloquentModelForClass(pkg, cls.Name)
-						}
-						break
-					}
-				}
-				if methodInfo != nil {
-					break
-				}
-			}
-			if methodInfo != nil {
-				break
-			}
-			// Optionally search interfaces and traits as well
-			for _, iface := range pkg.Interfaces {
-				for i := range iface.Methods {
-					m := &iface.Methods[i]
-					if m.Name == chunk.Name {
-						methodInfo = m
-						className = iface.Name
-						namespace = iface.Namespace
-						break
-					}
-				}
-				if methodInfo != nil {
-					break
-				}
-			}
-			if methodInfo != nil {
-				break
-			}
-			for _, trait := range pkg.Traits {
-				for i := range trait.Methods {
-					m := &trait.Methods[i]
-					if m.Name == chunk.Name {
-						methodInfo = m
-						className = trait.Name
-						namespace = trait.Namespace
-						break
-					}
-				}
-				if methodInfo != nil {
-					break
-				}
-			}
-			if methodInfo != nil {
-				break
-			}
-		} else {
-			// Global function
-			for i := range pkg.Functions {
-				fn := &pkg.Functions[i]
-				if fn.Name == chunk.Name {
-					if chunk.StartLine > 0 && fn.StartLine > 0 && chunk.StartLine != fn.StartLine {
-						continue
-					}
-					funcInfo = fn
-					namespace = fn.Namespace
-					break
-				}
-			}
-			if funcInfo != nil {
-				break
+		// If we have line numbers, verify they match.
+		if chunk.StartLine > 0 && bc.StartLine > 0 && chunk.StartLine != bc.StartLine {
+			continue
+		}
+		// Package/namespace match if specified.
+		if chunk.Package != "" && bc.Package != "" && bc.Package != chunk.Package {
+			continue
+		}
+		matched = bc
+		namespace = bc.Package
+		// For methods, try to extract class name from metadata.
+		if bc.Metadata != nil {
+			if cn, ok := bc.Metadata["class_name"].(string); ok {
+				className = cn
 			}
 		}
+		break
 	}
 
 	// JSON output
 	if format == "json" {
-		desc := buildDescriptor(methodInfo, funcInfo, className, namespace, eloquentModel)
+		desc := buildDescriptor(matched, className, namespace)
 		data, err := json.MarshalIndent(desc, "", "  ")
 		if err != nil {
 			return "", fmt.Errorf("failed to marshal PHP function descriptor: %w", err)
@@ -698,122 +566,53 @@ func (t *GetFunctionDetailsTool) buildPHPFunctionResponse(chunk *codetypes.CodeC
 		return string(data), nil
 	}
 
-	// Markdown output: preserve existing behaviour
+	// Markdown output
 	var response strings.Builder
 
 	kind := chunk.Type
-	if kind == "method" {
-		kind = "method"
-	} else {
+	if kind != "method" {
 		kind = "function"
+	}
+
+	if namespace == "" {
+		namespace = chunk.Package
 	}
 
 	// Header
 	response.WriteString(fmt.Sprintf("# %s\n\n", chunk.Name))
 	response.WriteString(fmt.Sprintf("**Kind:** %s\n", kind))
-	if namespace == "" {
-		namespace = chunk.Package
-	}
 	response.WriteString(fmt.Sprintf("**Namespace:** %s\n", namespace))
 	if className != "" {
 		response.WriteString(fmt.Sprintf("**Class:** %s\n", className))
 	}
 
+	// Build descriptor to reuse the structured info for markdown rendering.
+	desc := buildDescriptor(matched, className, namespace)
+
 	// Signature
-	var sig string
-	if methodInfo != nil {
-		sig = methodInfo.Signature
-		if sig == "" {
-			visibility := methodInfo.Visibility
-			if visibility == "" {
-				visibility = "public"
-			}
-			var prefixParts []string
-			if methodInfo.IsAbstract {
-				prefixParts = append(prefixParts, "abstract")
-			}
-			if methodInfo.IsFinal {
-				prefixParts = append(prefixParts, "final")
-			}
-			prefixParts = append(prefixParts, visibility)
-			if methodInfo.IsStatic {
-				prefixParts = append(prefixParts, "static")
-			}
-			prefix := strings.Join(prefixParts, " ")
-			sig = fmt.Sprintf("%s function %s()", prefix, methodInfo.Name)
-		}
-	} else if funcInfo != nil {
-		sig = funcInfo.Signature
-		if sig == "" {
-			sig = fmt.Sprintf("function %s()", funcInfo.Name)
-		}
-	} else {
-		sig = chunk.Signature
-		if sig == "" {
-			sig = fmt.Sprintf("function %s()", chunk.Name)
-		}
-	}
-	response.WriteString(fmt.Sprintf("**Signature:** `%s`\n\n", sig))
+	response.WriteString(fmt.Sprintf("**Signature:** `%s`\n\n", desc.Signature))
 
 	// Description
-	if methodInfo != nil && methodInfo.Description != "" {
-		response.WriteString(fmt.Sprintf("**Description:**\n%s\n\n", methodInfo.Description))
-	} else if funcInfo != nil && funcInfo.Description != "" {
-		response.WriteString(fmt.Sprintf("**Description:**\n%s\n\n", funcInfo.Description))
-	} else if chunk.Docstring != "" {
-		response.WriteString(fmt.Sprintf("**Description:**\n%s\n\n", chunk.Docstring))
+	if desc.Description != "" {
+		response.WriteString(fmt.Sprintf("**Description:**\n%s\n\n", desc.Description))
 	}
 
 	// Location
 	response.WriteString(fmt.Sprintf("**Location:** `%s:%d-%d`\n\n", chunk.FilePath, chunk.StartLine, chunk.EndLine))
 
 	// Parameters
-	if methodInfo != nil && len(methodInfo.Parameters) > 0 {
+	if len(desc.Parameters) > 0 {
 		response.WriteString("**Parameters:**\n")
-		for _, p := range methodInfo.Parameters {
-			typeStr := p.Type
-			if typeStr == "" {
-				typeStr = "mixed"
-			}
-			response.WriteString(fmt.Sprintf("- `$%s`: %s\n", p.Name, typeStr))
-		}
-		response.WriteString("\n")
-	} else if funcInfo != nil && len(funcInfo.Parameters) > 0 {
-		response.WriteString("**Parameters:**\n")
-		for _, p := range funcInfo.Parameters {
-			typeStr := p.Type
-			if typeStr == "" {
-				typeStr = "mixed"
-			}
-			response.WriteString(fmt.Sprintf("- `$%s`: %s\n", p.Name, typeStr))
+		for _, p := range desc.Parameters {
+			response.WriteString(fmt.Sprintf("- `$%s`: %s\n", p.Name, p.Type))
 		}
 		response.WriteString("\n")
 	}
 
 	// Returns
-	var returns []codetypes.ReturnInfo
-	var returnType string
-	if methodInfo != nil {
-		returns = methodInfo.Returns
-		returnType = methodInfo.ReturnType
-	} else if funcInfo != nil {
-		returns = funcInfo.Returns
-		returnType = funcInfo.ReturnType
-	}
-	// If this is an Eloquent model relation method, inject a relation return type when missing
-	if methodInfo != nil && eloquentModel != nil && findRelationForMethod(eloquentModel, methodInfo.Name) != nil {
-		rel := findRelationForMethod(eloquentModel, methodInfo.Name)
-		relationType := formatRelationReturnType(rel)
-		if len(returns) == 0 && returnType == "" {
-			returns = append(returns, codetypes.ReturnInfo{Type: relationType, Description: "Laravel Eloquent relation"})
-		} else {
-			returns = append(returns, codetypes.ReturnInfo{Type: relationType, Description: "Laravel Eloquent relation"})
-		}
-	}
-
-	if len(returns) > 0 {
+	if len(desc.Returns) > 0 {
 		response.WriteString("**Returns:**\n")
-		for _, r := range returns {
+		for _, r := range desc.Returns {
 			typeStr := r.Type
 			if typeStr == "" {
 				typeStr = "mixed"
@@ -825,9 +624,6 @@ func (t *GetFunctionDetailsTool) buildPHPFunctionResponse(chunk *codetypes.CodeC
 			}
 		}
 		response.WriteString("\n")
-	} else if returnType != "" {
-		response.WriteString("**Returns:**\n")
-		response.WriteString(fmt.Sprintf("- `%s`\n\n", returnType))
 	}
 
 	// Code snippet

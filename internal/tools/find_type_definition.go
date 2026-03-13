@@ -11,7 +11,6 @@ import (
 	"github.com/doITmagic/rag-code-mcp/internal/memory"
 	"github.com/doITmagic/rag-code-mcp/internal/ragcode/analyzers/golang"
 	"github.com/doITmagic/rag-code-mcp/internal/ragcode/analyzers/php"
-	laravel "github.com/doITmagic/rag-code-mcp/internal/ragcode/analyzers/php/laravel"
 	"github.com/doITmagic/rag-code-mcp/internal/workspace"
 )
 
@@ -362,60 +361,26 @@ processResults:
 	return response.String(), nil
 }
 
-// findEloquentModelForClass looks up the EloquentModel for a given PHP class name within a PackageInfo.
-func findEloquentModelForClass(pkg *php.PackageInfo, className string) *laravel.EloquentModel {
-	analyzer := laravel.NewEloquentAnalyzer(pkg)
-	for _, m := range analyzer.AnalyzeModels() {
-		if m.ClassName == className {
-			return &m
+// collectRelatedChunks finds method/property/constant chunks that belong to a given class.
+func collectRelatedChunks(chunks []codetypes.CodeChunk, className, filePath string) (methods, properties, constants []codetypes.CodeChunk) {
+	for _, ch := range chunks {
+		if ch.FilePath != filePath {
+			continue
+		}
+		switch ch.Type {
+		case "method":
+			methods = append(methods, ch)
+		case "property":
+			properties = append(properties, ch)
+		case "constant":
+			constants = append(constants, ch)
 		}
 	}
-	return nil
-}
-
-// findRelationForMethod finds an EloquentRelation matching a given method name.
-func findRelationForMethod(model *laravel.EloquentModel, methodName string) *laravel.EloquentRelation {
-	for i := range model.Relations {
-		rel := &model.Relations[i]
-		if rel.Name == methodName {
-			return rel
-		}
-	}
-	return nil
-}
-
-// formatRelationReturnType formats an EloquentRelation into a human-readable return type,
-// e.g. "HasMany<App\Act>" or "BelongsToMany<App\Lawyer>".
-func formatRelationReturnType(rel *laravel.EloquentRelation) string {
-	base := rel.Type
-	switch rel.Type {
-	case "hasOne":
-		base = "HasOne"
-	case "hasMany":
-		base = "HasMany"
-	case "belongsTo":
-		base = "BelongsTo"
-	case "belongsToMany":
-		base = "BelongsToMany"
-	case "hasManyThrough":
-		base = "HasManyThrough"
-	case "morphTo":
-		base = "MorphTo"
-	case "morphMany":
-		base = "MorphMany"
-	case "morphToMany":
-		base = "MorphToMany"
-	case "morphedByMany":
-		base = "MorphedByMany"
-	}
-	if rel.RelatedModel != "" {
-		return fmt.Sprintf("%s<%s>", base, rel.RelatedModel)
-	}
-	return base
+	return
 }
 
 // buildPHPTypeResponse builds a rich type definition view for a PHP class/interface/trait
-// by re-analyzing the source file with the PHP CodeAnalyzer. This avoids relying on
+// by re-analyzing the source file with the PHP BridgeAnalyzer. This avoids relying on
 // vector metadata only and allows us to show fields and methods similar to Go's TypeInfo.
 //
 // outputFormat can be "markdown" (default) or "json". The JSON form returns a
@@ -427,7 +392,7 @@ func (t *FindTypeDefinitionTool) buildPHPTypeResponse(chunk *codetypes.CodeChunk
 	}
 
 	// Helper to build a ClassDescriptor from whatever information we have.
-	buildDescriptor := func(classInfo *php.ClassInfo, eloquentModel *laravel.EloquentModel) codetypes.ClassDescriptor {
+	buildDescriptor := func(classInfo *php.ClassInfo) codetypes.ClassDescriptor {
 		desc := codetypes.ClassDescriptor{
 			Language:  chunk.Language,
 			Kind:      chunk.Type,
@@ -566,49 +531,8 @@ func (t *FindTypeDefinitionTool) buildPHPTypeResponse(chunk *codetypes.CodeChunk
 					})
 				}
 
-				// If this is an Eloquent model, try to infer relation return type
-				if eloquentModel != nil {
-					if rel := findRelationForMethod(eloquentModel, method.Name); rel != nil {
-						relationType := formatRelationReturnType(rel)
-						md.Returns = append(md.Returns, codetypes.ReturnDescriptor{
-							Type:        relationType,
-							Description: "Laravel Eloquent relation",
-							SourceHint:  "inferred_relation",
-						})
-					}
-				}
-
 				desc.Methods = append(desc.Methods, md)
 			}
-		}
-
-		// Laravel model-specific data
-		if eloquentModel != nil {
-			desc.Kind = "model"
-			desc.Table = eloquentModel.Table
-			desc.Fillable = eloquentModel.Fillable
-			desc.Hidden = eloquentModel.Hidden
-			desc.Visible = eloquentModel.Visible
-			desc.Appends = eloquentModel.Appends
-			desc.Casts = eloquentModel.Casts
-
-			for _, s := range eloquentModel.Scopes {
-				desc.Scopes = append(desc.Scopes, s.Name)
-			}
-			for _, attr := range eloquentModel.Attributes {
-				desc.Attributes = append(desc.Attributes, attr.Name)
-			}
-			for _, rel := range eloquentModel.Relations {
-				desc.Relations = append(desc.Relations, codetypes.RelationDescriptor{
-					Name:          rel.Name,
-					RelationKind:  rel.Type,
-					RelatedSymbol: rel.RelatedModel,
-					ForeignKey:    rel.ForeignKey,
-					LocalKey:      rel.LocalKey,
-				})
-			}
-			// Add basic framework tags so consumers can detect model types easily
-			desc.Tags = append(desc.Tags, "framework:laravel", "laravel:model")
 		}
 
 		return desc
@@ -618,7 +542,7 @@ func (t *FindTypeDefinitionTool) buildPHPTypeResponse(chunk *codetypes.CodeChunk
 	if chunk.FilePath == "" {
 		if format == "json" {
 			// Minimal descriptor based on the chunk
-			desc := buildDescriptor(nil, nil)
+			desc := buildDescriptor(nil)
 			data, err := json.MarshalIndent(desc, "", "  ")
 			if err != nil {
 				return "", fmt.Errorf("failed to marshal PHP type descriptor: %w", err)
@@ -642,12 +566,13 @@ func (t *FindTypeDefinitionTool) buildPHPTypeResponse(chunk *codetypes.CodeChunk
 		return response.String(), nil
 	}
 
-	// Re-run the PHP analyzer on the source file to reconstruct ClassInfo
-	analyzer := php.NewCodeAnalyzer()
-	if _, err := analyzer.AnalyzeFile(chunk.FilePath); err != nil {
+	// Re-run the PHP bridge analyzer on the source file to reconstruct ClassInfo
+	bridgeAnalyzer := php.NewBridgeAnalyzer()
+	bridgeChunks, err := bridgeAnalyzer.AnalyzePaths([]string{chunk.FilePath})
+	if err != nil {
 		// If analyzer fails, degrade gracefully
 		if format == "json" {
-			desc := buildDescriptor(nil, nil)
+			desc := buildDescriptor(nil)
 			data, err2 := json.MarshalIndent(desc, "", "  ")
 			if err2 != nil {
 				return "", fmt.Errorf("failed to marshal PHP type descriptor: %w", err2)
@@ -668,30 +593,89 @@ func (t *FindTypeDefinitionTool) buildPHPTypeResponse(chunk *codetypes.CodeChunk
 		return response.String(), nil
 	}
 
+	// Find the class chunk matching our target and reconstruct ClassInfo from bridge chunks
 	var classInfo *php.ClassInfo
-	var eloquentModel *laravel.EloquentModel
-	for _, pkg := range analyzer.GetPackages() {
-		// Narrow down by namespace if we have it
-		if chunk.Package != "" && pkg.Namespace != "" && pkg.Namespace != chunk.Package {
+	for _, ch := range bridgeChunks {
+		if ch.FilePath != chunk.FilePath {
 			continue
 		}
-		for i := range pkg.Classes {
-			cls := pkg.Classes[i]
-			if cls.Name == chunk.Name {
-				classInfo = &cls
-				// If this is a Laravel project, try to enrich with Eloquent relations
-				eloquentModel = findEloquentModelForClass(pkg, cls.Name)
-				break
+		isClassLike := ch.Type == "class" || ch.Type == "interface" || ch.Type == "trait"
+		if !isClassLike || ch.Name != chunk.Name {
+			continue
+		}
+		// Build a ClassInfo from the class chunk and its related method/property/constant chunks
+		methods, properties, constants := collectRelatedChunks(bridgeChunks, ch.Name, ch.FilePath)
+		ci := php.ClassInfo{
+			Name:      ch.Name,
+			Namespace: ch.Package,
+			FullName:  ch.Package + "\\" + ch.Name,
+			FilePath:  ch.FilePath,
+			StartLine: ch.StartLine,
+			EndLine:   ch.EndLine,
+			Code:      ch.Code,
+		}
+		if ch.Docstring != "" {
+			ci.Description = ch.Docstring
+		}
+		// Parse extends/implements from signature if available
+		if sig := ch.Signature; sig != "" {
+			if idx := strings.Index(sig, " extends "); idx >= 0 {
+				rest := sig[idx+len(" extends "):]
+				if implIdx := strings.Index(rest, " implements "); implIdx >= 0 {
+					ci.Extends = strings.TrimSpace(rest[:implIdx])
+					implStr := rest[implIdx+len(" implements "):]
+					for _, impl := range strings.Split(implStr, ",") {
+						ci.Implements = append(ci.Implements, strings.TrimSpace(impl))
+					}
+				} else {
+					ci.Extends = strings.TrimSpace(rest)
+				}
+			} else if idx := strings.Index(sig, " implements "); idx >= 0 {
+				implStr := sig[idx+len(" implements "):]
+				for _, impl := range strings.Split(implStr, ",") {
+					ci.Implements = append(ci.Implements, strings.TrimSpace(impl))
+				}
 			}
 		}
-		if classInfo != nil {
-			break
+		// Populate methods from related chunks
+		for _, mch := range methods {
+			mi := php.MethodInfo{
+				Name:      mch.Name,
+				Signature: mch.Signature,
+				FilePath:  mch.FilePath,
+				StartLine: mch.StartLine,
+				EndLine:   mch.EndLine,
+				Code:      mch.Code,
+			}
+			if mch.Docstring != "" {
+				mi.Description = mch.Docstring
+			}
+			ci.Methods = append(ci.Methods, mi)
 		}
+		// Populate properties from related chunks
+		for _, pch := range properties {
+			pi := php.PropertyInfo{
+				Name: pch.Name,
+			}
+			if pch.Docstring != "" {
+				pi.Description = pch.Docstring
+			}
+			ci.Properties = append(ci.Properties, pi)
+		}
+		// Populate constants from related chunks
+		for _, cch := range constants {
+			constInfo := php.ConstantInfo{
+				Name: cch.Name,
+			}
+			ci.Constants = append(ci.Constants, constInfo)
+		}
+		classInfo = &ci
+		break
 	}
 
 	// JSON output: return a structured descriptor
 	if format == "json" {
-		desc := buildDescriptor(classInfo, eloquentModel)
+		desc := buildDescriptor(classInfo)
 		data, err := json.MarshalIndent(desc, "", "  ")
 		if err != nil {
 			return "", fmt.Errorf("failed to marshal PHP type descriptor: %w", err)
@@ -820,38 +804,10 @@ func (t *FindTypeDefinitionTool) buildPHPTypeResponse(chunk *codetypes.CodeChunk
 			} else if method.ReturnType != "" {
 				response.WriteString("  - Returns:\n")
 				response.WriteString(fmt.Sprintf("    - `%s`\n", method.ReturnType))
-			} else if eloquentModel != nil {
-				// If this is an Eloquent model, try to infer relation return type
-				if rel := findRelationForMethod(eloquentModel, method.Name); rel != nil {
-					relationType := formatRelationReturnType(rel)
-					response.WriteString("  - Returns:\n")
-					response.WriteString(fmt.Sprintf("    - `%s`\n", relationType))
-				}
 			}
 
 			response.WriteString("\n")
 		}
-	}
-
-	// Laravel relations section (if any)
-	if eloquentModel != nil && len(eloquentModel.Relations) > 0 {
-		response.WriteString("**Laravel Relations:**\n")
-		for _, rel := range eloquentModel.Relations {
-			relationType := formatRelationReturnType(&rel)
-			response.WriteString(fmt.Sprintf("- `%s`: `%s`", rel.Name, relationType))
-			if rel.ForeignKey != "" || rel.LocalKey != "" {
-				keys := []string{}
-				if rel.ForeignKey != "" {
-					keys = append(keys, fmt.Sprintf("foreignKey=%s", rel.ForeignKey))
-				}
-				if rel.LocalKey != "" {
-					keys = append(keys, fmt.Sprintf("localKey=%s", rel.LocalKey))
-				}
-				response.WriteString(fmt.Sprintf(" (%s)", strings.Join(keys, ", ")))
-			}
-			response.WriteString("\n")
-		}
-		response.WriteString("\n")
 	}
 
 	// Code snippet

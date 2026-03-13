@@ -590,7 +590,7 @@ func TestGetFunctionDetailsTool_PHPUserRoles_JSON(t *testing.T) {
 		t.Errorf("expected receiver=User, got %q", desc.Receiver)
 	}
 	if len(desc.Returns) == 0 {
-		t.Errorf("expected at least one return type (including Laravel relation)")
+		t.Errorf("expected at least one return type")
 	}
 }
 

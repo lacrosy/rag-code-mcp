@@ -7,7 +7,6 @@ project_name: rag-code-mcp
 
 before:
   hooks:
-    # Ensure dependencies are up to date
     - go mod tidy
     - go mod download
 
@@ -15,57 +14,60 @@ builds:
   - id: rag-code-mcp
     main: ./cmd/rag-code-mcp
     binary: rag-code-mcp
-    
     env:
       - CGO_ENABLED=0
-    
     goos:
       - linux
       - darwin
       - windows
-    
     goarch:
       - amd64
       - arm64
-    
-    # Ignore certain combinations
     ignore:
       - goos: windows
         goarch: arm64
-    
     ldflags:
       - -s -w
       - -X main.Version={{.Version}}
       - -X main.Commit={{.Commit}}
       - -X main.Date={{.Date}}
-      - -X main.BuiltBy=goreleaser
+
+  - id: index-all
+    main: ./cmd/index-all
+    binary: index-all
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
 
   - id: ragcode-installer
     main: ./cmd/install
     binary: ragcode-installer
-    
     env:
       - CGO_ENABLED=0
-    
     goos:
       - linux
       - darwin
       - windows
-    
     goarch:
       - amd64
       - arm64
-    
     ignore:
       - goos: windows
         goarch: arm64
-    
     ldflags:
       - -s -w
       - -X main.Version={{.Version}}
-      - -X main.Commit={{.Commit}}
-      - -X main.Date={{.Date}}
-      - -X main.BuiltBy=goreleaser
 
 archives:
   - id: default
@@ -74,17 +76,17 @@ archives:
       {{ .ProjectName }}_
       {{- .Os }}_
       {{- .Arch }}
-    
-    # Use zip for Windows
     format_overrides:
       - goos: windows
         format: zip
-    
     files:
       - LICENSE
       - README.md
-      - config.yaml
-      - .env.example
+      # PHP bridge (nikic/php-parser) — source only, composer install runs at install time
+      - php-bridge/parse.php
+      - php-bridge/src/**/*
+      - php-bridge/composer.json
+      - php-bridge/composer.lock
 
 checksum:
   name_template: 'checksums.txt'
@@ -109,9 +111,6 @@ changelog:
     - title: 'Bug Fixes'
       regexp: "^.*fix[(\\w)]*:+.*$"
       order: 1
-    - title: 'Performance Improvements'
-      regexp: "^.*perf[(\\w)]*:+.*$"
-      order: 2
     - title: 'Other Changes'
       order: 999
 
@@ -119,47 +118,39 @@ release:
   github:
     owner: doITmagic
     name: rag-code-mcp
-  
+
   draft: false
   prerelease: auto
-  
+
   name_template: "{{.ProjectName}} v{{.Version}}"
-  
+
   header: |
     ## RagCode MCP Server v{{.Version}}
-    
+
     Semantic code navigation using RAG (Retrieval-Augmented Generation).
-    
-    ### Installation
-    
-    **Linux (amd64):**
-    ```bash
-    curl -L https://github.com/doITmagic/rag-code-mcp/releases/latest/download/rag-code-mcp_linux_amd64.tar.gz | tar xz
-    ./ragcode-installer -ollama=docker -qdrant=docker
-    ```
-    
+    PHP 8.1-8.4 support via nikic/php-parser. Symfony framework detection.
+
+    ### Quick Install (into ./ragcode/ of your project)
+
     **macOS (Apple Silicon):**
     ```bash
-    curl -L https://github.com/doITmagic/rag-code-mcp/releases/latest/download/rag-code-mcp_darwin_arm64.tar.gz | tar xz
-    ./ragcode-installer -ollama=docker -qdrant=docker
+    curl -fsSL https://github.com/doITmagic/rag-code-mcp/releases/latest/download/rag-code-mcp_darwin_arm64.tar.gz | tar xz
+    ./ragcode-installer
     ```
-    
-    **Or download the archive for your platform below.**
-  
-  footer: |
-    ### What's Next?
-    
-    1. Install dependencies: Ollama and Qdrant
-    2. Configure your environment (see README.md)
-    3. Start the server: `rag-code-mcp`
-    
-    **Full documentation:** https://github.com/doITmagic/rag-code-mcp
 
-# Homebrew tap (optional, can be enabled later)
-# brews:
-#   - repository:
-#       owner: doITmagic
-#       name: homebrew-tap
-#     homepage: https://github.com/doITmagic/rag-code-mcp
-#     description: Semantic code navigation for Go codebases using RAG
-#     license: MIT
+    **macOS (Intel):**
+    ```bash
+    curl -fsSL https://github.com/doITmagic/rag-code-mcp/releases/latest/download/rag-code-mcp_darwin_amd64.tar.gz | tar xz
+    ./ragcode-installer
+    ```
+
+    **Linux (amd64):**
+    ```bash
+    curl -fsSL https://github.com/doITmagic/rag-code-mcp/releases/latest/download/rag-code-mcp_linux_amd64.tar.gz | tar xz
+    ./ragcode-installer
+    ```
+
+    The installer puts everything into `./ragcode/` and configures detected IDEs automatically.
+
+  footer: |
+    **Full documentation:** https://github.com/doITmagic/rag-code-mcp

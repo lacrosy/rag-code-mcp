@@ -293,7 +293,7 @@ func TestInferProjectType(t *testing.T) {
 		want   string
 	}{
 		{"go.mod", "go"},
-		{"artisan", "laravel"},
+		{"artisan", "php-symfony"},
 		{"composer.json", "php"},
 		{"package.json", "nodejs"},
 		{"Cargo.toml", "rust"},

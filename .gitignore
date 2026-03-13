@@ -10,6 +10,8 @@ barou/
 /rag-code-mcp
 test-*
 bin/
+build/
+dist/
 ragcode-installer
 index-all
 cmd/rag-code-mcp/rag-code-mcp
@@ -56,6 +58,7 @@ Thumbs.db
 tmp/
 temp/
 
-# Scripts
-scripts/
+# PHP bridge vendor (installed via composer)
+php-bridge/vendor/
+
 .ragcode/

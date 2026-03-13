@@ -34,8 +34,8 @@ func NewDetector() *Detector {
 		markers: []string{
 			".git",           // Git repository (highest priority)
 			"go.mod",         // Go project
-			"composer.json",  // PHP/Laravel project
-			"artisan",        // Laravel project (specific)
+			"composer.json",  // PHP project
+			"artisan",        // Symfony console / PHP project
 			"package.json",   // Node.js project
 			"Cargo.toml",     // Rust project
 			"pyproject.toml", // Python project (PEP 518)
@@ -385,7 +385,7 @@ func inferProjectType(marker string) string {
 	case "go.mod":
 		return "go"
 	case "artisan":
-		return "laravel"
+		return "php-symfony"
 	case "composer.json":
 		return "php"
 	case "package.json":

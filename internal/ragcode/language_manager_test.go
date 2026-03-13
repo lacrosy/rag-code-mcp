@@ -41,9 +41,9 @@ func TestAnalyzerManager_CodeAnalyzerForProjectType_PHP(t *testing.T) {
 	}{
 		{"php", "php", true},
 		{"PHP uppercase", "PHP", true},
-		{"php-laravel", "php-laravel", true},
-		{"laravel", "laravel", true},
-		{"Laravel uppercase", "Laravel", true},
+		{"php-symfony", "php-symfony", true},
+		{"symfony", "symfony", true},
+		{"Symfony uppercase", "Symfony", true},
 	}
 
 	for _, tt := range tests {
@@ -126,9 +126,9 @@ func TestNormalizeProjectType(t *testing.T) {
 		{"unknown", LanguageGo},
 		{"php", LanguagePHP},
 		{"PHP", LanguagePHP},
-		{"php-laravel", LanguagePHP},
-		{"laravel", LanguagePHP},
-		{"Laravel", LanguagePHP},
+		{"php-symfony", LanguagePHP},
+		{"symfony", LanguagePHP},
+		{"Symfony", LanguagePHP},
 		{"  php  ", LanguagePHP},
 		{"python", LanguagePython},
 		{"Python", LanguagePython},
