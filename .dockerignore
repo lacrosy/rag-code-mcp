@@ -1,0 +1,8 @@
+.git
+.github
+.claude
+.ragcode
+bin/
+*.md
+!php-bridge/
+php-bridge/vendor/

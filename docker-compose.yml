@@ -1,0 +1,32 @@
+# Ragcode infrastructure: Qdrant (vector DB) + Ollama (embeddings/LLM)
+# Used by `ragcode install` and can be started standalone.
+#
+# Usage:
+#   docker compose up -d          # start Qdrant + Ollama
+#   docker compose down            # stop
+#   docker compose down -v         # stop + wipe data
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  qdrant_data:
+  ollama_data:

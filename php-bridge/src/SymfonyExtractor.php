@@ -628,7 +628,13 @@ class SymfonyExtractor extends NodeVisitorAbstract
             };
         }
         if ($expr instanceof Node\Expr\ClassConstFetch) {
-            return $this->printType($expr->class) . '::' . $expr->name->toString();
+            $class = $this->printType($expr->class);
+            $const = $expr->name->toString();
+            // Foo::class → resolve to FQN without "::class" suffix
+            if ($const === 'class') {
+                return $class;
+            }
+            return $class . '::' . $const;
         }
         if ($expr instanceof Node\Expr\Array_) {
             $result = [];

@@ -346,6 +346,90 @@ class SymbolExtractor extends NodeVisitorAbstract
                 'is_final' => $node->isFinal(),
             ],
         ];
+
+        // Emit promoted constructor parameters as property symbols
+        if ($name === '__construct') {
+            $this->extractPromotedProperties($node, $className);
+        }
+    }
+
+    /**
+     * Extract promoted constructor parameters as property symbols (PHP 8.0+).
+     */
+    private function extractPromotedProperties(Stmt\ClassMethod $node, string $className): void
+    {
+        foreach ($node->params as $param) {
+            // A promoted param has visibility flags (public/protected/private)
+            if ($param->flags === 0) {
+                continue;
+            }
+
+            $paramName = ($param->var instanceof Node\Expr\Variable && is_string($param->var->name))
+                ? $param->var->name
+                : '';
+            if ($paramName === '') {
+                continue;
+            }
+
+            $type = $param->type ? $this->printType($param->type) : null;
+
+            // Determine visibility from flags
+            $vis = 'public';
+            if ($param->flags & Stmt\Class_::MODIFIER_PRIVATE) {
+                $vis = 'private';
+            } elseif ($param->flags & Stmt\Class_::MODIFIER_PROTECTED) {
+                $vis = 'protected';
+            }
+
+            $isReadonly = (bool)($param->flags & Stmt\Class_::MODIFIER_READONLY);
+
+            // PHP 8.4 asymmetric visibility on promoted params
+            $setVisibility = null;
+            if (method_exists($param, 'isPrivateSet') && $param->isPrivateSet()) {
+                $setVisibility = 'private';
+            } elseif (method_exists($param, 'isProtectedSet') && $param->isProtectedSet()) {
+                $setVisibility = 'protected';
+            }
+
+            // PHP 8.4 property hooks on promoted params
+            $hasHooks = property_exists($param, 'hooks') && !empty($param->hooks);
+
+            $sig = $vis;
+            if ($setVisibility) {
+                $sig .= ' ' . $setVisibility . '(set)';
+            }
+            if ($isReadonly) {
+                $sig .= ' readonly';
+            }
+            if ($type) {
+                $sig .= ' ' . $type;
+            }
+            $sig .= ' $' . $paramName;
+
+            $symbolData = [
+                'name' => $paramName,
+                'type' => 'property',
+                'namespace' => $this->currentNamespace,
+                'class_name' => $className,
+                'signature' => $sig,
+                'file_path' => $this->filePath,
+                'start_line' => $param->getStartLine(),
+                'end_line' => $param->getEndLine(),
+                'property_type' => $type,
+                'visibility' => $vis,
+                'modifiers' => [
+                    'is_static' => false,
+                    'is_readonly' => $isReadonly,
+                    'has_hooks' => $hasHooks,
+                ],
+            ];
+
+            if ($setVisibility) {
+                $symbolData['set_visibility'] = $setVisibility;
+            }
+
+            $this->symbols[] = $symbolData;
+        }
     }
 
     private function processProperty(Stmt\Property $node, string $className): void
