@@ -269,33 +269,50 @@ func installPHPBridge(dir string) {
 		if err := copyDir("php-bridge", bridgeDir); err != nil {
 			fail(fmt.Sprintf("Failed to copy php-bridge: %v", err))
 		}
-	} else if _, err := os.Stat(filepath.Join(bridgeDir, "parse.php")); err != nil {
-		// Not in source tree and no existing bridge — clone just the php-bridge
-		log("Cloning PHP bridge from repository...")
-		tmpDir, err := os.MkdirTemp("", "ragcode-clone-*")
-		if err != nil {
-			fail(fmt.Sprintf("Cannot create temp dir: %v", err))
-		}
-		defer os.RemoveAll(tmpDir)
-
-		cmd := exec.Command("git", "clone", "--depth", "1", "--filter=blob:none", "--sparse",
-			repoURL+".git", tmpDir)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fail(fmt.Sprintf("Failed to clone repo: %v", err))
-		}
-
-		sparseCmd := exec.Command("git", "-C", tmpDir, "sparse-checkout", "set", "php-bridge")
-		if err := sparseCmd.Run(); err != nil {
-			fail(fmt.Sprintf("Failed to sparse-checkout: %v", err))
-		}
-
-		if err := copyDir(filepath.Join(tmpDir, "php-bridge"), bridgeDir); err != nil {
-			fail(fmt.Sprintf("Failed to copy php-bridge: %v", err))
-		}
 	} else {
-		log("PHP bridge already exists, skipping copy.")
+		// Not in source tree — check if existing bridge is complete (has Dockerfile for Docker mode)
+		needsUpdate := false
+		if _, err := os.Stat(filepath.Join(bridgeDir, "parse.php")); err != nil {
+			needsUpdate = true // No bridge at all
+		} else if _, err := os.Stat(filepath.Join(bridgeDir, "Dockerfile")); err != nil {
+			log("PHP bridge exists but missing Dockerfile — updating...")
+			needsUpdate = true // Old version without Docker support
+		} else if _, err := os.Stat(filepath.Join(bridgeDir, "server.php")); err != nil {
+			log("PHP bridge exists but missing server.php — updating...")
+			needsUpdate = true // Old version without Docker support
+		}
+
+		if needsUpdate {
+			log("Cloning PHP bridge from repository...")
+			tmpDir, err := os.MkdirTemp("", "ragcode-clone-*")
+			if err != nil {
+				fail(fmt.Sprintf("Cannot create temp dir: %v", err))
+			}
+			defer os.RemoveAll(tmpDir)
+
+			cmd := exec.Command("git", "clone", "--depth", "1", "--filter=blob:none", "--sparse",
+				repoURL+".git", tmpDir)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				fail(fmt.Sprintf("Failed to clone repo: %v", err))
+			}
+
+			sparseCmd := exec.Command("git", "-C", tmpDir, "sparse-checkout", "set", "php-bridge")
+			if err := sparseCmd.Run(); err != nil {
+				fail(fmt.Sprintf("Failed to sparse-checkout: %v", err))
+			}
+
+			// Remove old bridge dir and copy fresh one
+			if err := os.RemoveAll(bridgeDir); err != nil && !os.IsNotExist(err) {
+				fail(fmt.Sprintf("Cannot clean %s: %v", bridgeDir, err))
+			}
+			if err := copyDir(filepath.Join(tmpDir, "php-bridge"), bridgeDir); err != nil {
+				fail(fmt.Sprintf("Failed to copy php-bridge: %v", err))
+			}
+		} else {
+			log("PHP bridge already up to date, skipping copy.")
+		}
 	}
 
 	// Composer install runs inside Docker container — no local PHP/Composer needed.
