@@ -66,6 +66,10 @@ func main() {
 	}
 	if *pathsCSV != "" {
 		paths = splitCSV(*pathsCSV)
+		// When paths are provided explicitly via CLI, clear index_include from config
+		// to prevent scanWorkspace from joining index_include subdirs onto already-specific paths.
+		// e.g. -paths /project/src with index_include=[src] would look for /project/src/src
+		cfg.Workspace.IndexInclude = nil
 	}
 
 	llmCfg := cfg.LLM
@@ -122,30 +126,27 @@ func main() {
 	// Create workspace manager
 	mgr := workspace.NewManager(qclientCode, provider, cfg)
 
-	// Create workspace info manually
-	info := &workspace.Info{
-		ID:          fmt.Sprintf("cli-%s", codeCollection),
-		Root:        filepath.Clean(paths[0]), // Use first path as root for state tracking
-		ProjectType: "mixed",
-		Languages:   []string{"go", "php"}, // We could detect this, but for now hardcode supported langs
-	}
+	// Index each path separately — each path is its own workspace root for scanning
+	for _, p := range paths {
+		cleanPath := filepath.Clean(p)
+		info := &workspace.Info{
+			ID:          fmt.Sprintf("cli-%s", codeCollection),
+			Root:        cleanPath,
+			ProjectType: "mixed",
+			Languages:   []string{"go", "php"},
+		}
 
-	// If multiple paths are provided, we might need a better strategy for Root.
-	// For now, assume paths[0] is the workspace root.
-	if len(paths) > 1 {
-		log.Printf("⚠️ Multiple paths provided. Using '%s' as workspace root for state tracking.", info.Root)
-	}
+		// Index Go files
+		fmt.Printf("🔎 Indexing Go files in '%s' (incremental)...\n", cleanPath)
+		if err := mgr.IndexLanguage(ctx, info, "go", codeCollection, false); err != nil {
+			log.Printf("⚠️ Go indexing warning: %v", err)
+		}
 
-	// Index Go files
-	fmt.Printf("🔎 Indexing Go files in '%s' (incremental)...\n", info.Root)
-	if err := mgr.IndexLanguage(ctx, info, "go", codeCollection, false); err != nil {
-		log.Printf("⚠️ Go indexing warning: %v", err)
-	}
-
-	// Index PHP files
-	fmt.Printf("🔎 Indexing PHP files in '%s' (incremental)...\n", info.Root)
-	if err := mgr.IndexLanguage(ctx, info, "php", codeCollection, false); err != nil {
-		log.Printf("⚠️ PHP indexing warning: %v", err)
+		// Index PHP files
+		fmt.Printf("🔎 Indexing PHP files in '%s' (incremental)...\n", cleanPath)
+		if err := mgr.IndexLanguage(ctx, info, "php", codeCollection, false); err != nil {
+			log.Printf("⚠️ PHP indexing warning: %v", err)
+		}
 	}
 
 	fmt.Println("✅ Code indexing completed.")
