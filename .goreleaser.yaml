@@ -81,7 +81,9 @@ archives:
     files:
       - LICENSE
       - README.md
-      # PHP bridge (nikic/php-parser) — source only, composer install runs at install time
+      # PHP bridge — Docker container files + source
+      - php-bridge/Dockerfile
+      - php-bridge/server.php
       - php-bridge/parse.php
       - php-bridge/src/**/*
       - php-bridge/composer.json
