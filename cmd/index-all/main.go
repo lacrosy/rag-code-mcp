@@ -126,14 +126,35 @@ func main() {
 	// Create workspace manager
 	mgr := workspace.NewManager(qclientCode, provider, cfg)
 
+	// Derive workspace ID from collection name for CollectionNameForLanguage compatibility.
+	// Collection name format: {prefix}-{workspaceID}-{language}
+	// e.g. "ragcode-b7c8e42d52a5-php" → prefix="ragcode", workspaceID="b7c8e42d52a5"
+	collectionPrefix := cfg.Workspace.CollectionPrefix
+	if collectionPrefix == "" {
+		collectionPrefix = "ragcode"
+	}
+	workspaceID := codeCollection
+	// Strip prefix ("ragcode-") from the beginning
+	if strings.HasPrefix(workspaceID, collectionPrefix+"-") {
+		workspaceID = workspaceID[len(collectionPrefix)+1:]
+	}
+	// Strip language suffix ("-php", "-go", etc.) from the end
+	for _, lang := range []string{"-php", "-go", "-python", "-html"} {
+		if strings.HasSuffix(workspaceID, lang) {
+			workspaceID = workspaceID[:len(workspaceID)-len(lang)]
+			break
+		}
+	}
+
 	// Index each path separately — each path is its own workspace root for scanning
 	for _, p := range paths {
 		cleanPath := filepath.Clean(p)
 		info := &workspace.Info{
-			ID:          fmt.Sprintf("cli-%s", codeCollection),
-			Root:        cleanPath,
-			ProjectType: "mixed",
-			Languages:   []string{"go", "php"},
+			ID:               workspaceID,
+			Root:             cleanPath,
+			ProjectType:      "mixed",
+			Languages:        []string{"go", "php"},
+			CollectionPrefix: collectionPrefix,
 		}
 
 		// Index Go files
