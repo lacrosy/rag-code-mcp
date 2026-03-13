@@ -19,19 +19,30 @@ require_once __DIR__ . '/vendor/autoload.php';
 
 use RagCode\Bridge\SymbolExtractor;
 use RagCode\Bridge\SymfonyExtractor;
+use RagCode\Bridge\ExtractorLoader;
 use PhpParser\ParserFactory;
 use PhpParser\NodeTraverser;
 use PhpParser\ErrorHandler\Collecting;
 
 function main(): int
 {
-    $opts = getopt('', ['file:', 'batch', 'help']);
+    $opts = getopt('', ['file:', 'batch', 'extractors-dir:', 'help']);
 
     if (isset($opts['help'])) {
         fwrite(STDERR, "Usage:\n");
         fwrite(STDERR, "  php parse.php --file /path/to/file.php\n");
         fwrite(STDERR, "  echo \"/path/file1.php\\n/path/file2.php\" | php parse.php --batch\n");
+        fwrite(STDERR, "  php parse.php --batch --extractors-dir /path/to/extractors\n");
         return 0;
+    }
+
+    // Discover custom extractors
+    $extractorClasses = [];
+    if (isset($opts['extractors-dir']) && is_string($opts['extractors-dir'])) {
+        $extractorClasses = ExtractorLoader::loadFromDirectory($opts['extractors-dir']);
+        if ($extractorClasses) {
+            fwrite(STDERR, "Loaded " . count($extractorClasses) . " custom extractor(s): " . implode(', ', array_map(fn($c) => (new \ReflectionClass($c))->getShortName(), $extractorClasses)) . "\n");
+        }
     }
 
     $files = [];
@@ -104,19 +115,37 @@ function main(): int
             $symfonyExtractor = new SymfonyExtractor($filePath, $code);
             $traverser->addVisitor($symbolExtractor);
             $traverser->addVisitor($symfonyExtractor);
+
+            // Add custom extractors
+            $customExtractors = ExtractorLoader::instantiate($extractorClasses, $filePath, $code);
+            foreach ($customExtractors as $ext) {
+                $traverser->addVisitor($ext);
+            }
+
             $traverser->traverse($stmts);
 
             $symbols = $symbolExtractor->getSymbols();
 
-            // Enrich with Symfony metadata
+            // Collect all metadata: Symfony + custom extractors
+            $allMetadata = [];
             $symfonyMetadata = $symfonyExtractor->getMetadata();
-            if (!empty($symfonyMetadata)) {
+            foreach ($symfonyMetadata as $fqn => $meta) {
+                $allMetadata[$fqn] = array_merge($allMetadata[$fqn] ?? [], $meta);
+            }
+            foreach ($customExtractors as $ext) {
+                foreach ($ext->getMetadata() as $fqn => $meta) {
+                    $allMetadata[$fqn] = array_merge($allMetadata[$fqn] ?? [], $meta);
+                }
+            }
+
+            // Enrich symbols with collected metadata
+            if (!empty($allMetadata)) {
                 foreach ($symbols as &$symbol) {
                     $key = ($symbol['namespace'] ?? '') . '\\' . $symbol['name'];
-                    if (isset($symfonyMetadata[$key])) {
+                    if (isset($allMetadata[$key])) {
                         $symbol['metadata'] = array_merge(
                             $symbol['metadata'] ?? [],
-                            $symfonyMetadata[$key]
+                            $allMetadata[$key]
                         );
                     }
                 }

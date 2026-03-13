@@ -22,6 +22,7 @@ use PhpParser\ParserFactory;
 use PhpParser\NodeTraverser;
 use RagCode\Bridge\SymbolExtractor;
 use RagCode\Bridge\SymfonyExtractor;
+use RagCode\Bridge\ExtractorLoader;
 
 // ─── Routing ─────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,14 @@ function handleParse(): void
     }
 
     $files = $request['files'];
+    $extractorsDir = $request['extractors_dir'] ?? null;
+
+    // Discover custom extractors if directory provided
+    $extractorClasses = [];
+    if ($extractorsDir && is_string($extractorsDir) && is_dir($extractorsDir)) {
+        $extractorClasses = ExtractorLoader::loadFromDirectory($extractorsDir);
+    }
+
     $parser = (new ParserFactory())->createForNewestSupportedVersion();
     $allSymbols = [];
     $errors = [];
@@ -94,18 +103,33 @@ function handleParse(): void
             $traverser = new NodeTraverser();
             $traverser->addVisitor($extractor);
             $traverser->addVisitor($symfonyExtractor);
+
+            // Add custom extractors
+            $customExtractors = ExtractorLoader::instantiate($extractorClasses, $filePath, $code);
+            foreach ($customExtractors as $ext) {
+                $traverser->addVisitor($ext);
+            }
+
             $traverser->traverse($stmts);
 
             $symbols = $extractor->getSymbols();
-            $symfonyMeta = $symfonyExtractor->getMetadata();
 
-            // Merge Symfony metadata into class symbols
+            // Collect all metadata: Symfony + custom extractors
+            $allMeta = [];
+            foreach ($symfonyExtractor->getMetadata() as $fqn => $meta) {
+                $allMeta[$fqn] = array_merge($allMeta[$fqn] ?? [], $meta);
+            }
+            foreach ($customExtractors as $ext) {
+                foreach ($ext->getMetadata() as $fqn => $meta) {
+                    $allMeta[$fqn] = array_merge($allMeta[$fqn] ?? [], $meta);
+                }
+            }
+
+            // Merge metadata into symbols
             foreach ($symbols as &$symbol) {
-                if (in_array($symbol['type'], ['class', 'enum'], true)) {
-                    $fqn = ($symbol['namespace'] ? $symbol['namespace'] . '\\' : '') . $symbol['name'];
-                    if (isset($symfonyMeta[$fqn])) {
-                        $symbol['metadata'] = $symfonyMeta[$fqn];
-                    }
+                $fqn = ($symbol['namespace'] ? $symbol['namespace'] . '\\' : '') . $symbol['name'];
+                if (isset($allMeta[$fqn])) {
+                    $symbol['metadata'] = array_merge($symbol['metadata'] ?? [], $allMeta[$fqn]);
                 }
             }
             unset($symbol);

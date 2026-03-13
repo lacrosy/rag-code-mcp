@@ -49,5 +49,6 @@ workspace:
     - dist
     - .venv
   collection_prefix: ragcode
+  php_extractors_dir: /Users/r.sainiev/PhpstormProjects/pspi/ragcode/extractors
   index_include: []
   index_exclude: []

@@ -202,4 +202,10 @@ type WorkspaceConfig struct {
 	// in workspace roots to ensure AI follows the "Golden Rule"
 	// Default: true
 	AutoCreateIDERules bool `yaml:"auto_create_ide_rules"`
+
+	// PHPExtractorsDir is the path to a directory containing custom PHP extractor plugins.
+	// These are *Extractor.php files extending AbstractExtractor that enrich symbols with
+	// project-specific metadata. Path is relative to workspace root.
+	// Example: "ragcode/extractors"
+	PHPExtractorsDir string `yaml:"php_extractors_dir"`
 }
