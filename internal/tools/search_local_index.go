@@ -236,6 +236,12 @@ func (t *SearchLocalIndexTool) Execute(ctx context.Context, params map[string]in
 		}
 
 		if len(docs) > 0 {
+			// Reassemble split chunks: if any result is a part of a larger chunk,
+			// fetch siblings and merge them back into a single result.
+			if fetcher, ok := workspaceMem.(ChunkSiblingFetcher); ok {
+				docs = reassembleChunkedDocs(ctx, docs, fetcher)
+			}
+
 			if outputFormat == "markdown" {
 				result := fmt.Sprintf("🔍 Found %d relevant code snippets in workspace '%s':\n\n",
 					len(docs), workspaceInfo.Root)

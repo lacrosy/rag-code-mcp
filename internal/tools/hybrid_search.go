@@ -228,6 +228,10 @@ func (t *HybridSearchTool) Execute(ctx context.Context, params map[string]interf
 		if len(topSemantic) > limit {
 			topSemantic = topSemantic[:limit]
 		}
+		// Reassemble split chunks
+		if fetcher, ok := workspaceMem.(ChunkSiblingFetcher); ok {
+			topSemantic = reassembleChunkedDocs(ctx, topSemantic, fetcher)
+		}
 		if outputFormat == "markdown" {
 			return formatHybridResults(topSemantic, false, workspaceMem != nil, workspacePath), nil
 		}
@@ -266,6 +270,11 @@ func (t *HybridSearchTool) Execute(ctx context.Context, params map[string]interf
 		res.doc.Metadata["semantic_score"] = res.semantic
 		res.doc.Metadata["lexical_score"] = res.lexical
 		finalDocs = append(finalDocs, res.doc)
+	}
+
+	// Reassemble split chunks
+	if fetcher, ok := workspaceMem.(ChunkSiblingFetcher); ok {
+		finalDocs = reassembleChunkedDocs(ctx, finalDocs, fetcher)
 	}
 
 	if outputFormat == "markdown" {
