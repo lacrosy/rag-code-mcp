@@ -34,6 +34,7 @@ var (
 // Simple logger using log level from env
 type simpleLogger struct {
 	logFile *os.File
+	quiet   bool // suppress stderr output (MCP mode — log to file only)
 }
 
 func (l *simpleLogger) Close() {
@@ -54,7 +55,9 @@ func (l *simpleLogger) shouldLog(msgLevel string) bool {
 
 func (l *simpleLogger) Info(format string, args ...interface{}) {
 	if l.shouldLog("info") {
-		fmt.Fprintf(os.Stderr, "[INFO] "+format+"\n", args...)
+		if !l.quiet {
+			fmt.Fprintf(os.Stderr, "[INFO] "+format+"\n", args...)
+		}
 		if l.logFile != nil {
 			fmt.Fprintf(l.logFile, "[INFO] "+format+"\n", args...)
 		}
@@ -63,7 +66,9 @@ func (l *simpleLogger) Info(format string, args ...interface{}) {
 
 func (l *simpleLogger) Error(format string, args ...interface{}) {
 	if l.shouldLog("error") {
-		fmt.Fprintf(os.Stderr, "[ERROR] "+format+"\n", args...)
+		if !l.quiet {
+			fmt.Fprintf(os.Stderr, "[ERROR] "+format+"\n", args...)
+		}
 		if l.logFile != nil {
 			fmt.Fprintf(l.logFile, "[ERROR] "+format+"\n", args...)
 		}
@@ -72,30 +77,30 @@ func (l *simpleLogger) Error(format string, args ...interface{}) {
 
 func (l *simpleLogger) Warn(format string, args ...interface{}) {
 	if l.shouldLog("warn") {
-		fmt.Fprintf(os.Stderr, "[WARN] "+format+"\n", args...)
+		if !l.quiet {
+			fmt.Fprintf(os.Stderr, "[WARN] "+format+"\n", args...)
+		}
+		if l.logFile != nil {
+			fmt.Fprintf(l.logFile, "[WARN] "+format+"\n", args...)
+		}
 	}
 }
 
 var logger = &simpleLogger{}
 
+// stderrf writes to stderr unless quiet mode is enabled
+func stderrf(format string, args ...interface{}) {
+	if !logger.quiet {
+		fmt.Fprintf(os.Stderr, format, args...)
+	}
+	if logger.logFile != nil {
+		fmt.Fprintf(logger.logFile, format, args...)
+	}
+}
+
 func resolveLogPath(path string) (string, error) {
 	if path == "" {
 		return "", nil
-	}
-
-	// If path is just a filename (no separators), put it NEXT TO THE EXECUTABLE
-	if filepath.Base(path) == path {
-		exePath, err := os.Executable()
-		if err != nil {
-			// Fallback to CWD if executable path fails
-			return path, nil
-		}
-		exeDir := filepath.Dir(exePath)
-
-		debugFile := "/tmp/ragcode-path-debug.txt"
-		_ = os.WriteFile(debugFile, []byte(fmt.Sprintf("Exe: %s\nDir: %s\nPath: %s\n", exePath, exeDir, filepath.Join(exeDir, path))), 0666)
-
-		return filepath.Join(exeDir, path), nil
 	}
 
 	// Handle tilde expansion for user convenience in config files
@@ -110,16 +115,20 @@ func resolveLogPath(path string) (string, error) {
 		return filepath.Join(home, path[2:]), nil
 	}
 
-	// If relative path with separators, make absolute relative to CWD
-	if !filepath.IsAbs(path) {
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return path, err
-		}
-		return abs, nil
+	// Absolute path — use as-is
+	if filepath.IsAbs(path) {
+		return path, nil
 	}
 
-	return path, nil
+	// Relative path (with or without separators) — resolve relative to the executable directory.
+	// MCP servers have unpredictable CWD (set by IDE), so we always anchor to exe dir.
+	exePath, err := os.Executable()
+	if err != nil {
+		// Fallback to CWD if executable path is unavailable
+		return filepath.Abs(path)
+	}
+	exeDir := filepath.Dir(exePath)
+	return filepath.Clean(filepath.Join(exeDir, path)), nil
 }
 
 func initLoggerFromEnv() {
@@ -139,20 +148,20 @@ func initLoggerFromEnv() {
 	// but we check again just in case env var was set externally
 	expanded, err := resolveLogPath(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] Failed to resolve log path %s: %v\n", path, err)
+		stderrf("[WARN] Failed to resolve log path %s: %v\n", path, err)
 		return
 	}
 	path = expanded
 
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] Failed to create log directory %s: %v\n", dir, err)
+		stderrf("[WARN] Failed to create log directory %s: %v\n", dir, err)
 		return
 	}
 
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] Failed to open log file %s: %v\n", path, err)
+		stderrf("[WARN] Failed to open log file %s: %v\n", path, err)
 		return
 	}
 
@@ -161,14 +170,18 @@ func initLoggerFromEnv() {
 	// FORCE DEBUG WRITE DIRECTLY TO FILE
 	timestamp := time.Now().Format(time.RFC3339)
 	if _, err := f.WriteString(fmt.Sprintf("--- STARTING FINAL FIX SESSION %s ---\n", timestamp)); err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] Failed to write startup line to log file: %v\n", err)
+		stderrf("[WARN] Failed to write startup line to log file: %v\n", err)
 	}
 	_ = f.Sync()
 
-	log.SetOutput(io.MultiWriter(os.Stderr, logger.logFile))
+	if logger.quiet {
+		log.SetOutput(logger.logFile)
+	} else {
+		log.SetOutput(io.MultiWriter(os.Stderr, logger.logFile))
+	}
 
 	// Log startup info to verify location
-	fmt.Fprintf(os.Stderr, "[INFO] Logging to file: %s\n", path)
+	stderrf("[INFO] Logging to file: %s\n", path)
 	log.Printf("Logger initialized successfully writing to %s", path)
 }
 
@@ -187,22 +200,19 @@ func rotateLogFile(path string, maxSizeMB int) {
 	}
 
 	// Log rotation needed
-	fmt.Fprintf(os.Stderr, "[INFO] Log file %s exceeds %dMB (%d bytes). Rotating...\n", path, maxSizeMB, info.Size())
+	stderrf("[INFO] Log file %s exceeds %dMB (%d bytes). Rotating...\n", path, maxSizeMB, info.Size())
 
-	// Read file
 	content, err := os.ReadFile(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] Failed to read log file for rotation: %v\n", err)
+		stderrf("[WARN] Failed to read log file for rotation: %v\n", err)
 		return
 	}
 
-	// Calculate cutoff (remove ~10%)
 	cutSize := len(content) / 10
 	if cutSize == 0 {
 		return
 	}
 
-	// Find next newline after cutoff to keep lines intact
 	cutoffIndex := -1
 	for i := cutSize; i < len(content); i++ {
 		if content[i] == '\n' {
@@ -210,30 +220,23 @@ func rotateLogFile(path string, maxSizeMB int) {
 			break
 		}
 	}
-
 	if cutoffIndex == -1 {
-		// Fallback: if no newline found (rare), just cut at 10%
 		cutoffIndex = cutSize
 	}
 
 	if cutoffIndex >= len(content) {
-		// Should not happen if file is large, but safety check
-		// If we cut everything, just truncate
 		if err := os.Truncate(path, 0); err != nil {
-			fmt.Fprintf(os.Stderr, "[WARN] Failed to truncate log file: %v\n", err)
+			stderrf("[WARN] Failed to truncate log file: %v\n", err)
 		}
 		return
 	}
 
-	newContent := content[cutoffIndex:]
-
-	// Rewrite file
-	if err := os.WriteFile(path, newContent, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] Failed to write rotated log file: %v\n", err)
+	if err := os.WriteFile(path, content[cutoffIndex:], 0644); err != nil {
+		stderrf("[WARN] Failed to write rotated log file: %v\n", err)
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "[INFO] Log file rotated. Removed %d bytes.\n", cutoffIndex)
+	stderrf("[INFO] Log file rotated. Removed %d bytes.\n", cutoffIndex)
 }
 
 func applyLoggingConfig(logCfg config.LoggingConfig) {
@@ -378,10 +381,15 @@ func main() {
 	// Workspace security flags - can be set in IDE MCP configuration
 	allowedPathsFlag := flag.String("allowed-paths", "", "Comma-separated list of allowed workspace paths (e.g., ~/projects,~/work)")
 	disableUpwardSearchFlag := flag.Bool("disable-upward-search", false, "Disable searching parent directories for workspace markers")
+	quietFlag := flag.Bool("quiet", false, "Suppress stderr output (MCP mode — log to file only)")
 	// Custom usage message
 	flag.Usage = printUsage
 
 	flag.Parse()
+
+	if *quietFlag {
+		logger.quiet = true
+	}
 
 	// Resolve config path
 	cfgPath := *configPath
@@ -589,7 +597,9 @@ func main() {
 	searchDocsTool := tools.NewSearchDocsTool(nil, ollamaProvider)
 	searchDocsTool.SetWorkspaceManager(workspaceManager)
 
-	indexWorkspaceTool := tools.NewIndexWorkspaceTool(workspaceManager)
+	// index_workspace tool removed — indexing is only via index-all CLI.
+	// AI agents use check_index_status to verify freshness.
+	checkIndexTool := tools.NewCheckIndexStatusTool(workspaceManager)
 
 	searchByMetadataTool := tools.NewSearchByMetadataTool(nil)
 	searchByMetadataTool.SetWorkspaceManager(workspaceManager)
@@ -626,7 +636,7 @@ func main() {
 	registerAgentTool(server, findImplTool, cfg)
 	registerAgentTool(server, searchDocsTool, cfg)
 	registerAgentTool(server, hybridTool, cfg)
-	registerAgentTool(server, indexWorkspaceTool, cfg)
+	registerAgentTool(server, checkIndexTool, cfg)
 	registerAgentTool(server, searchByMetadataTool, cfg)
 	registerAgentTool(server, listMetadataValuesTool, cfg)
 	registerAgentTool(server, getWorkspaceStatsTool, cfg)
@@ -1033,25 +1043,17 @@ func getToolSchema(toolName string) map[string]interface{} {
 			"required": []string{"query"},
 		}
 
-	case "index_workspace":
+	case "check_index_status":
 		return map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"workspace_root": map[string]interface{}{
 					"type":        "string",
-					"description": "Optional: explicit workspace root path (e.g., /home/user/projects/myapp). If provided, skips automatic detection and uses this path directly. Recommended for better security and control.",
+					"description": "Optional: explicit workspace root path. If not provided, auto-detected.",
 				},
 				"file_path": map[string]interface{}{
 					"type":        "string",
-					"description": "A file path within the workspace to index (used to detect workspace root). Not needed if workspace_root is provided.",
-				},
-				"language": map[string]interface{}{
-					"type":        "string",
-					"description": "Optional: specific language to index (e.g., 'go', 'python', 'php'). If not provided, all detected languages will be indexed.",
-				},
-				"recreate": map[string]interface{}{
-					"type":        "boolean",
-					"description": "Optional: If true, deletes existing collections and forces a full re-index. Use this if the index seems corrupted or results are poor.",
+					"description": "A file path within the workspace (used to detect workspace root if workspace_root not provided).",
 				},
 			},
 			"required": []string{},
