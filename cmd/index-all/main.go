@@ -23,34 +23,60 @@ import (
 
 func main() {
 	var (
-		pathsCSV   = flag.String("paths", "", "Comma-separated list of directories to index for code (defaults to rag_code.paths)")
+		configPath = flag.String("config", "", "Path to config.yaml (default: auto-discover next to binary or in CWD)")
 		model      = flag.String("model", "", "Embedding model id (overrides config; empty = use config)")
-		codeColl   = flag.String("code-collection", "", "Qdrant collection name for code (default: rag_code.collection)")
+		codeColl   = flag.String("code-collection", "", "Qdrant collection name for code (default: auto from workspace)")
 		docsColl   = flag.String("docs-collection", "", "Qdrant collection name for docs (default: docs.collection)")
-		dim        = flag.Int("dim", 1024, "Vector dimension for collections (depends on model)")
-		timeoutSec = flag.Int("timeout", 300, "Indexing timeout in seconds")
-		configPath = flag.String("config", "config.yaml", "Path to config.yaml to read settings")
+		dim        = flag.Int("dim", 0, "Vector dimension override (default: from config embedding_dim or 1024)")
+		timeoutSec = flag.Int("timeout", 86400, "Indexing timeout in seconds (default: 24h for large codebases)")
 		sourceDocs = flag.String("docs-source", "docs", "Source tag for docs metadata")
 		recreate   = flag.Bool("recreate-collections", false, "If set, delete and recreate code/docs collections before indexing (DANGEROUS)")
+		checkOnly  = flag.Bool("check", false, "Check if re-indexing is needed without indexing. Exit 0 = fresh, exit 1 = stale.")
+		// Deprecated: kept for backward compatibility; prefer config.yaml workspace.index_include
+		pathsCSV = flag.String("paths", "", "Comma-separated directories to index (overrides config index_include)")
 	)
 	flag.Parse()
+
+	// Auto-discover config.yaml
+	cfgPath := config.FindConfigFile(*configPath)
+	if cfgPath == "" {
+		cfgPath = "config.yaml" // will fail gracefully in config.Load
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutSec)*time.Second)
 	defer cancel()
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
 
-	codeCollection := cfg.RagCode.Collection
-	if codeCollection == "" {
-		if cfg.Storage.VectorDB.Collection != "" {
-			codeCollection = cfg.Storage.VectorDB.Collection
-		} else {
-			codeCollection = "do-ai-code"
-		}
+	// Resolve workspace root from config
+	wsRoot := cfg.ResolveWorkspaceRoot()
+	if wsRoot == "" {
+		log.Fatalf("workspace.workspace_root is not set in %s — cannot determine project root", cfgPath)
 	}
+	if _, err := os.Stat(wsRoot); err != nil {
+		log.Fatalf("workspace root does not exist: %s (resolved from config)", wsRoot)
+	}
+	log.Printf("📁 Workspace root: %s", wsRoot)
+
+	// Determine embedding dimension
+	embDim := cfg.Workspace.EmbeddingDim
+	if embDim <= 0 {
+		embDim = 1024 // default for mxbai-embed-large
+	}
+	if *dim > 0 {
+		embDim = *dim // CLI override
+	}
+
+	// Determine collection name
+	collectionPrefix := cfg.Workspace.CollectionPrefix
+	if collectionPrefix == "" {
+		collectionPrefix = "ragcode"
+	}
+	workspaceID := workspace.GenerateID(wsRoot)
+	codeCollection := collectionPrefix + "-" + workspaceID + "-php"
 	if *codeColl != "" {
 		codeCollection = *codeColl
 	}
@@ -60,18 +86,56 @@ func main() {
 		docsCollection = *docsColl
 	}
 
-	paths := cfg.RagCode.Paths
-	if len(paths) == 0 {
-		paths = []string{"./internal", "./cmd"}
-	}
-	if *pathsCSV != "" {
-		paths = splitCSV(*pathsCSV)
-		// When paths are provided explicitly via CLI, clear index_include from config
-		// to prevent scanWorkspace from joining index_include subdirs onto already-specific paths.
-		// e.g. -paths /project/src with index_include=[src] would look for /project/src/src
-		cfg.Workspace.IndexInclude = nil
+	// Determine directories to index
+	indexDirs := cfg.Workspace.IndexInclude
+	if len(indexDirs) == 0 {
+		indexDirs = []string{"src"} // sensible default
 	}
 
+	// CLI -paths override (backward compatibility)
+	if *pathsCSV != "" {
+		indexDirs = nil
+		for _, p := range strings.Split(*pathsCSV, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				// Normalize to relative path for scanWorkspace IndexInclude
+				if filepath.IsAbs(p) {
+					if rel, err := filepath.Rel(wsRoot, p); err == nil {
+						p = rel
+					}
+				}
+				indexDirs = append(indexDirs, p)
+			}
+		}
+		// Override config IndexInclude so scanWorkspace scans only these dirs
+		cfg.Workspace.IndexInclude = indexDirs
+	}
+
+	// Resolve index dirs to absolute paths (relative to workspace root)
+	var paths []string
+	for _, dir := range indexDirs {
+		absDir := dir
+		if !filepath.IsAbs(dir) {
+			absDir = filepath.Join(wsRoot, dir)
+		}
+		if fi, err := os.Stat(absDir); err == nil && fi.IsDir() {
+			paths = append(paths, absDir)
+		} else {
+			log.Printf("⚠️  Skipping missing directory: %s", absDir)
+		}
+	}
+
+	if len(paths) == 0 {
+		log.Fatalf("no valid directories to index (index_include: %v)", indexDirs)
+	}
+
+	// --check mode
+	if *checkOnly {
+		runCheckOnly(cfg, wsRoot)
+		return // unreachable
+	}
+
+	// Setup LLM
 	llmCfg := cfg.LLM
 	if llmCfg.OllamaBaseURL == "" && llmCfg.BaseURL != "" {
 		llmCfg.OllamaBaseURL = llmCfg.BaseURL
@@ -89,7 +153,10 @@ func main() {
 	}
 	llmCfg.Provider = "ollama"
 
-	//fmt.Printf("ℹ️ config: %+v\n", llmCfg)
+	// Set PHP bridge URL from config
+	if bridgeURL := cfg.Workspace.PHPBridgeURL; bridgeURL != "" {
+		os.Setenv("RAGCODE_PHP_BRIDGE_URL", bridgeURL)
+	}
 
 	provider, err := llm.NewOllamaLLMProvider(llmCfg)
 	if err != nil {
@@ -101,7 +168,6 @@ func main() {
 		APIKey:     cfg.Storage.VectorDB.APIKey,
 		Collection: codeCollection,
 	}
-	// Wait for Qdrant gRPC to become available (default port 6334)
 	if err := waitForQdrantGRPC(cfg.Storage.VectorDB.URL, 30*time.Second); err != nil {
 		log.Fatalf("qdrant grpc port did not become available in time: %v", err)
 	}
@@ -119,61 +185,35 @@ func main() {
 		}
 	}
 
-	if err := qclientCode.CreateCollection(ctx, codeCollection, *dim); err != nil {
+	if err := qclientCode.CreateCollection(ctx, codeCollection, embDim); err != nil {
 		log.Fatalf("create code collection: %v", err)
 	}
 
 	// Create workspace manager
 	mgr := workspace.NewManager(qclientCode, provider, cfg)
 
-	// Derive workspace ID from collection name for CollectionNameForLanguage compatibility.
-	// Collection name format: {prefix}-{workspaceID}-{language}
-	// e.g. "ragcode-b7c8e42d52a5-php" → prefix="ragcode", workspaceID="b7c8e42d52a5"
-	collectionPrefix := cfg.Workspace.CollectionPrefix
-	if collectionPrefix == "" {
-		collectionPrefix = "ragcode"
-	}
-	workspaceID := codeCollection
-	// Strip prefix ("ragcode-") from the beginning
-	if strings.HasPrefix(workspaceID, collectionPrefix+"-") {
-		workspaceID = workspaceID[len(collectionPrefix)+1:]
-	}
-	// Strip language suffix ("-php", "-go", etc.) from the end
-	for _, lang := range []string{"-php", "-go", "-python", "-html"} {
-		if strings.HasSuffix(workspaceID, lang) {
-			workspaceID = workspaceID[:len(workspaceID)-len(lang)]
-			break
-		}
+	// Use workspace root as info.Root — scanWorkspace handles IndexInclude internally
+	info := &workspace.Info{
+		ID:               workspaceID,
+		Root:             wsRoot,
+		ProjectType:      "mixed",
+		CollectionPrefix: collectionPrefix,
 	}
 
-	// Supported languages to try indexing
-	supportedLanguages := []string{"go", "php", "python", "html"}
-
-	// Index each path separately — each path is its own workspace root for scanning
-	for _, p := range paths {
-		cleanPath := filepath.Clean(p)
-		info := &workspace.Info{
-			ID:               workspaceID,
-			Root:             cleanPath,
-			ProjectType:      "mixed",
-			CollectionPrefix: collectionPrefix,
-		}
-
-		// Try each language — IndexLanguage will skip if no files found
-		for _, lang := range supportedLanguages {
-			fmt.Printf("🔎 Indexing %s files in '%s' (incremental)...\n", capitalizeFirst(lang), cleanPath)
-			if err := mgr.IndexLanguage(ctx, info, lang, codeCollection, false); err != nil {
-				if strings.Contains(err.Error(), "no") && strings.Contains(err.Error(), "source files detected") {
-					// Silently skip — no files of this language in this dir
-					continue
-				}
-				log.Printf("⚠️ %s indexing warning: %v", capitalizeFirst(lang), err)
+	// Index only configured languages (or all if index_languages is empty)
+	for _, lang := range mgr.GetIndexLanguages() {
+		fmt.Printf("🔎 Indexing %s files (incremental)...\n", capitalizeFirst(lang))
+		if err := mgr.IndexLanguage(ctx, info, lang, codeCollection, false); err != nil {
+			if strings.Contains(err.Error(), "no") && strings.Contains(err.Error(), "source files detected") {
+				continue
 			}
+			log.Printf("⚠️ %s indexing warning: %v", capitalizeFirst(lang), err)
 		}
 	}
 
 	fmt.Println("✅ Code indexing completed.")
 
+	// Docs indexing
 	var ltmDocs memory.LongTermMemory
 	if docsCollection == "" {
 		fmt.Println("ℹ️ docs.collection is empty, skipping docs indexing")
@@ -197,7 +237,7 @@ func main() {
 			}
 		}
 
-		if err := qclientDocs.CreateCollection(ctx, docsCollection, *dim); err != nil {
+		if err := qclientDocs.CreateCollection(ctx, docsCollection, embDim); err != nil {
 			log.Fatalf("create docs collection: %v", err)
 		}
 
@@ -207,6 +247,9 @@ func main() {
 		readmePath := cfg.Docs.ReadmePath
 		if readmePath == "" {
 			readmePath = "./README.md"
+		}
+		if !filepath.IsAbs(readmePath) {
+			readmePath = filepath.Join(wsRoot, readmePath)
 		}
 
 		docsPaths := cfg.Docs.DocsPaths
@@ -220,11 +263,11 @@ func main() {
 		}
 
 		for _, root := range docsPaths {
+			if !filepath.IsAbs(root) {
+				root = filepath.Join(wsRoot, root)
+			}
 			_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					return nil
-				}
-				if info.IsDir() {
+				if err != nil || info.IsDir() {
 					return nil
 				}
 				if strings.HasSuffix(strings.ToLower(info.Name()), ".md") {
@@ -237,7 +280,7 @@ func main() {
 		if len(docFiles) == 0 {
 			fmt.Println("ℹ️ no markdown files found for docs indexing")
 		} else {
-			fmt.Printf("📚 Indexing %d docs file(s) into docs collection '%s' (model=%s, dim=%d) ...\n", len(docFiles), docsCollection, llmCfg.OllamaEmbed, *dim)
+			fmt.Printf("📚 Indexing %d docs file(s) into docs collection '%s' (model=%s, dim=%d) ...\n", len(docFiles), docsCollection, llmCfg.OllamaEmbed, embDim)
 
 			indexedDocs := 0
 			for _, path := range docFiles {
@@ -250,23 +293,9 @@ func main() {
 			fmt.Printf("✅ Indexed %d docs file(s)\n", indexedDocs)
 		}
 	}
-
-}
-
-func splitCSV(s string) []string {
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // waitForQdrantGRPC pings Qdrant gRPC port on the host inferred from the given REST URL.
-// If the REST URL has port 6333, this function will try host:6334, which is Qdrant gRPC default.
 func waitForQdrantGRPC(baseURL string, timeout time.Duration) error {
 	if baseURL == "" {
 		baseURL = "http://localhost:6333"
@@ -281,8 +310,6 @@ func waitForQdrantGRPC(baseURL string, timeout time.Duration) error {
 	if port == "" || port == "6333" {
 		grpcHost = net.JoinHostPort(host, "6334")
 	} else {
-		// If a non-standard port was specified, guess that gRPC is at same port or +1?
-		// Use the same port by default.
 		grpcHost = net.JoinHostPort(host, port)
 	}
 
@@ -376,4 +403,49 @@ func capitalizeFirst(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// runCheckOnly compares state.json vs filesystem and exits with 0 (fresh) or 1 (stale).
+func runCheckOnly(cfg *config.Config, wsRoot string) {
+	wm := workspace.NewManager(nil, nil, cfg)
+
+	info := &workspace.Info{
+		Root:             wsRoot,
+		ID:               workspace.GenerateID(wsRoot),
+		ProjectType:      "configured",
+		CollectionPrefix: cfg.Workspace.CollectionPrefix,
+	}
+
+	report, err := wm.CheckIndexFreshness(info)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Check failed: %v\n", err)
+		os.Exit(2)
+	}
+
+	if report.Fresh {
+		fmt.Printf("✅ Index is fresh (%d files, last indexed: %s)\n", report.IndexedFiles, report.LastIndexed)
+		os.Exit(0)
+	}
+
+	// Stale
+	total := len(report.Added) + len(report.Modified) + len(report.Deleted)
+	fmt.Printf("⚠️  Index is stale (%d changes detected):\n", total)
+	if len(report.Added) > 0 {
+		fmt.Printf("   + %d new files\n", len(report.Added))
+		for _, f := range report.Added {
+			if len(report.Added) <= 10 {
+				fmt.Printf("     %s\n", f)
+			}
+		}
+		if len(report.Added) > 10 {
+			fmt.Printf("     ... and %d more\n", len(report.Added)-10)
+		}
+	}
+	if len(report.Modified) > 0 {
+		fmt.Printf("   ~ %d modified files\n", len(report.Modified))
+	}
+	if len(report.Deleted) > 0 {
+		fmt.Printf("   - %d deleted files\n", len(report.Deleted))
+	}
+	os.Exit(1)
 }
