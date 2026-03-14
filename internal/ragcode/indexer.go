@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,10 +26,25 @@ type Indexer struct {
 	embedder      llm.Provider
 	ltm           memory.LongTermMemory
 	onFileIndexed OnFileIndexed
+	// WorkspaceRoot is used to convert absolute file paths to relative paths
+	// in metadata (state.json, Qdrant payloads). Empty = store absolute paths.
+	WorkspaceRoot string
 }
 
 func NewIndexer(analyzer codetypes.PathAnalyzer, embedder llm.Provider, ltm memory.LongTermMemory) *Indexer {
 	return &Indexer{analyzer: analyzer, embedder: embedder, ltm: ltm}
+}
+
+// relFilePath returns path relative to WorkspaceRoot, or original path if WorkspaceRoot is empty.
+func (i *Indexer) relFilePath(absPath string) string {
+	if i.WorkspaceRoot == "" {
+		return absPath
+	}
+	rel, err := filepath.Rel(i.WorkspaceRoot, absPath)
+	if err != nil {
+		return absPath
+	}
+	return rel
 }
 
 // SetOnFileIndexed sets a callback invoked after all chunks of a file are stored.
@@ -59,9 +75,19 @@ func (i *Indexer) IndexPaths(ctx context.Context, paths []string, sourceTag stri
 	fmt.Fprintf(os.Stderr, "  %d files → %d chunks\n", totalFiles, total)
 	p := newProgress(total)
 	indexed := 0
+	skipped := 0
 	lastFile := ""
 
 	for idx, ch := range chunks {
+		// Check if parent context was cancelled (e.g. Ctrl+C)
+		if ctx.Err() != nil {
+			p.clear()
+			if skipped > 0 {
+				log.Printf("⚠️  Skipped %d chunks due to embed errors before cancellation", skipped)
+			}
+			return indexed, fmt.Errorf("indexing cancelled: %w", ctx.Err())
+		}
+
 		text := strings.TrimSpace(strings.Join(filterNonEmpty([]string{
 			ch.Docstring,
 			ch.Signature,
@@ -77,50 +103,77 @@ func (i *Indexer) IndexPaths(ctx context.Context, paths []string, sourceTag stri
 			continue
 		}
 
-		emb, err := i.embedder.Embed(ctx, text)
-		if err != nil {
-			p.clear()
-			return indexed, fmt.Errorf("embed failed for %s:%s: %w", ch.FilePath, ch.Name, err)
-		}
+		// Split large chunks that would exceed embedding model context window
+		subChunks := splitChunkIfNeeded(ch, text, DefaultMaxChunkTokens, DefaultOverlapTokens)
 
-		h := fnv.New64a()
-		h.Write([]byte(fmt.Sprintf("%s:%d-%d:%s", ch.FilePath, ch.StartLine, ch.EndLine, ch.Name)))
-		id := fmt.Sprintf("%d", h.Sum64())
+		for partIdx, sc := range subChunks {
+			// Per-chunk timeout: 2 minutes max per embed call (prevents one slow chunk from blocking)
+			embedCtx, embedCancel := context.WithTimeout(ctx, 2*time.Minute)
+			emb, err := i.embedder.Embed(embedCtx, sc.EmbedText)
+			embedCancel()
+			if err != nil {
+				// Skip failed chunks instead of aborting the entire indexing run
+				skipped++
+				p.clearForLog("⚠️  Skip chunk %s:%s (part %d/%d): %v",
+					ch.FilePath, ch.Name, partIdx+1, len(subChunks), err)
+				continue
+			}
 
-		chunkJSON, err := json.Marshal(ch)
-		if err != nil {
-			p.clear()
-			return indexed, fmt.Errorf("marshal chunk failed for %s: %w", ch.Name, err)
-		}
+			// Generate unique ID; for split chunks include part index
+			h := fnv.New64a()
+			if sc.TotalParts > 1 {
+				h.Write([]byte(fmt.Sprintf("%s:%d-%d:%s:part%d",
+					ch.FilePath, ch.StartLine, ch.EndLine, ch.Name, sc.PartIndex)))
+			} else {
+				h.Write([]byte(fmt.Sprintf("%s:%d-%d:%s",
+					ch.FilePath, ch.StartLine, ch.EndLine, ch.Name)))
+			}
+			id := fmt.Sprintf("%d", h.Sum64())
 
-		docMeta := map[string]interface{}{
-			"file":       ch.FilePath,
-			"package":    ch.Package,
-			"name":       ch.Name,
-			"type":       ch.Type,
-			"signature":  ch.Signature,
-			"start_line": ch.StartLine,
-			"end_line":   ch.EndLine,
-			"source":     sourceTag,
-			"basename":   filepath.Base(ch.FilePath),
-		}
-		// Merge extra metadata from analyzers (e.g. pspi_provider, symfony_type)
-		for k, v := range ch.Metadata {
-			docMeta[k] = v
-		}
+			chunkJSON, err := json.Marshal(sc.Chunk)
+			if err != nil {
+				skipped++
+				p.clearForLog("⚠️  Skip chunk %s (marshal error): %v", ch.Name, err)
+				continue
+			}
 
-		doc := memory.Document{
-			ID:        id,
-			Content:   string(chunkJSON),
-			Embedding: emb,
-			Metadata:  docMeta,
-		}
+			relFile := i.relFilePath(ch.FilePath)
+			docMeta := map[string]interface{}{
+				"file":       relFile,
+				"package":    ch.Package,
+				"name":       ch.Name,
+				"type":       ch.Type,
+				"signature":  ch.Signature,
+				"start_line": ch.StartLine,
+				"end_line":   ch.EndLine,
+				"source":     sourceTag,
+				"basename":   filepath.Base(ch.FilePath),
+			}
+			// Merge extra metadata from analyzers (e.g. pspi_provider, symfony_type)
+			for k, v := range sc.Chunk.Metadata {
+				docMeta[k] = v
+			}
+			// Add split metadata to Qdrant payload for search reassembly
+			if sc.TotalParts > 1 {
+				docMeta["parent_id"] = sc.ParentID
+				docMeta["chunk_part"] = fmt.Sprintf("%d", sc.PartIndex)
+				docMeta["chunk_total"] = fmt.Sprintf("%d", sc.TotalParts)
+			}
 
-		if err := i.ltm.Store(ctx, doc); err != nil {
-			p.clear()
-			return indexed, fmt.Errorf("store failed for %s: %w", id, err)
+			doc := memory.Document{
+				ID:        id,
+				Content:   string(chunkJSON),
+				Embedding: emb,
+				Metadata:  docMeta,
+			}
+
+			if err := i.ltm.Store(ctx, doc); err != nil {
+				skipped++
+				p.clearForLog("⚠️  Skip chunk %s (store error): %v", id, err)
+				continue
+			}
+			indexed++
 		}
-		indexed++
 
 		// Notify when switching to a new file (all chunks of previous file are done)
 		if lastFile != "" && ch.FilePath != lastFile && i.onFileIndexed != nil {
@@ -136,6 +189,9 @@ func (i *Indexer) IndexPaths(ctx context.Context, paths []string, sourceTag stri
 	}
 
 	p.clear()
+	if skipped > 0 {
+		log.Printf("⚠️  Indexing completed with %d skipped chunks (out of %d total)", skipped, total)
+	}
 	return indexed, nil
 }
 
@@ -203,6 +259,17 @@ func (p *progress) update(done int, filePath string) {
 	stats := fmt.Sprintf("%.1f%% | %d/%d | %.1f/s | ETA %s",
 		pct*100, done, p.total, speed, eta)
 	fmt.Fprintf(os.Stderr, "\033[2K  %s\n", stats)
+}
+
+// clearForLog temporarily removes the progress bar, prints a log message, then marks
+// the bar as needing redraw. Call update() after to restore it.
+func (p *progress) clearForLog(format string, args ...interface{}) {
+	if p.printed {
+		// Move up 3 lines and clear each
+		fmt.Fprintf(os.Stderr, "\033[3A\033[2K\033[1B\033[2K\033[1B\033[2K\033[3A")
+	}
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	p.printed = false // next update() won't try to overwrite old bar
 }
 
 // clear removes the progress display after completion
