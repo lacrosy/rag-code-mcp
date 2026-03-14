@@ -135,6 +135,47 @@ func (m *Manager) scanWorkspace(info *Info) (*workspaceScan, error) {
 	return scan, nil
 }
 
+// defaultExtToLanguage maps file extensions to language names.
+var defaultExtToLanguage = map[string]string{
+	".go":   "go",
+	".php":  "php",
+	".py":   "python",
+	".html": "html",
+	".htm":  "html",
+}
+
+// isLanguageEnabled checks if a language is allowed by config.
+// Empty IndexLanguages = all languages enabled.
+func (m *Manager) isLanguageEnabled(lang string) bool {
+	langs := m.config.Workspace.IndexLanguages
+	if len(langs) == 0 {
+		return true
+	}
+	for _, l := range langs {
+		if strings.EqualFold(l, lang) {
+			return true
+		}
+	}
+	return false
+}
+
+// GetIndexLanguages returns configured languages or all supported languages.
+func (m *Manager) GetIndexLanguages() []string {
+	if langs := m.config.Workspace.IndexLanguages; len(langs) > 0 {
+		return langs
+	}
+	// Deduplicated default languages
+	seen := make(map[string]struct{})
+	var result []string
+	for _, lang := range defaultExtToLanguage {
+		if _, ok := seen[lang]; !ok {
+			seen[lang] = struct{}{}
+			result = append(result, lang)
+		}
+	}
+	return result
+}
+
 // walkDir walks a directory tree and collects files by language.
 func (m *Manager) walkDir(root string, scan *workspaceScan, dirCache map[string]map[string]struct{}, skipDirs map[string]struct{}, excludePatterns []string, wsRoot string) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -173,26 +214,27 @@ func (m *Manager) walkDir(root string, scan *workspaceScan, dirCache map[string]
 			}
 		}
 
-		scan.TotalFiles++
 		ext := strings.ToLower(filepath.Ext(path))
-		switch ext {
-		case ".go":
-			addDirForLanguage(scan, dirCache, "go", filepath.Dir(path))
-			addFileForLanguage(scan, "go", path)
-		case ".php":
-			addDirForLanguage(scan, dirCache, "php", filepath.Dir(path))
-			addFileForLanguage(scan, "php", path)
-		case ".py":
-			addDirForLanguage(scan, dirCache, "python", filepath.Dir(path))
-			addFileForLanguage(scan, "python", path)
-		case ".html", ".htm":
-			addDirForLanguage(scan, dirCache, "html", filepath.Dir(path))
-			addFileForLanguage(scan, "html", path)
-		case ".md":
+
+		// Markdown docs are always collected regardless of language filter
+		if ext == ".md" {
+			scan.TotalFiles++
 			scan.DocFiles = append(scan.DocFiles, path)
-		default:
-			// ignored
+			return nil
 		}
+
+		lang, known := defaultExtToLanguage[ext]
+		if !known {
+			return nil
+		}
+
+		if !m.isLanguageEnabled(lang) {
+			return nil
+		}
+
+		scan.TotalFiles++
+		addDirForLanguage(scan, dirCache, lang, filepath.Dir(path))
+		addFileForLanguage(scan, lang, path)
 		return nil
 	})
 }
@@ -331,8 +373,34 @@ func (m *Manager) getCollectionMutex(name string) *sync.Mutex {
 	return lock
 }
 
-// DetectWorkspace detects workspace from tool parameters
+// DetectWorkspace detects workspace from tool parameters.
+// If workspace_root is set in config.yaml, it is used directly without auto-detection.
 func (m *Manager) DetectWorkspace(params map[string]interface{}) (*Info, error) {
+	// PRIORITY 0: Use workspace_root from config.yaml (hardcoded, no detection)
+	if m.config != nil {
+		wsRoot := m.config.ResolveWorkspaceRoot()
+		if wsRoot != "" {
+			// Check cache first
+			if cached := m.cache.Get(wsRoot); cached != nil {
+				return cached, nil
+			}
+
+			info := &Info{
+				Root:             wsRoot,
+				ID:               generateWorkspaceID(wsRoot),
+				ProjectType:      "configured",
+				CollectionPrefix: m.config.Workspace.CollectionPrefix,
+				DetectedAt:       time.Now(),
+			}
+			if info.CollectionPrefix == "" {
+				info.CollectionPrefix = "ragcode"
+			}
+
+			m.cache.Set(wsRoot, info)
+			return info, nil
+		}
+	}
+
 	// PRIORITY 1: Check for explicit workspace_root parameter
 	if workspaceRoot, ok := params["workspace_root"]; ok {
 		if rootPath, ok := workspaceRoot.(string); ok && rootPath != "" {
@@ -664,95 +732,104 @@ func (m *Manager) IndexLanguage(ctx context.Context, info *Info, language string
 		state = NewWorkspaceState() // Start with fresh state
 	}
 
+	// Helper: convert absolute path to relative (for state.json and Qdrant metadata)
+	toRel := func(absPath string) string {
+		r, err := filepath.Rel(info.Root, absPath)
+		if err != nil {
+			return absPath
+		}
+		return r
+	}
+	// Helper: convert relative state path back to absolute (for os.Stat)
+	toAbs := func(relOrAbsPath string) string {
+		if filepath.IsAbs(relOrAbsPath) {
+			return relOrAbsPath // backward compat with old state.json
+		}
+		return filepath.Join(info.Root, relOrAbsPath)
+	}
+
 	// Identify changes
-	var filesToIndex []string
-	var filesToDelete []string
+	var filesToIndex []string  // absolute paths (for analyzer)
+	var filesToDelete []string // relative paths (for Qdrant + state)
 
 	currentFiles := scan.LanguageFiles[strings.ToLower(language)]
-
-	// Add markdown files to the list of files to check if this is the primary language
-	// or if we handle them separately. For simplicity, let's handle docs as part of the language index
-	// but with distinct metadata.
-	// Actually, indexMarkdownFiles handles them separately in collection.
-	// Let's integrate them into the state tracking.
 	currentDocs := scan.DocFiles
 
 	// Check for added or modified files (Code)
-	// We collect file info but do NOT update state until after successful indexing
-	fileInfoMap := make(map[string]os.FileInfo)
-	for _, path := range currentFiles {
-		fi, err := os.Stat(path)
+	// State stores RELATIVE paths; scan returns ABSOLUTE paths.
+	fileInfoMap := make(map[string]os.FileInfo) // keyed by absolute path
+	for _, absPath := range currentFiles {
+		fi, err := os.Stat(absPath)
 		if err != nil {
 			continue
 		}
 
-		fileState, exists := state.GetFileState(path)
+		rel := toRel(absPath)
+		fileState, exists := state.GetFileState(rel)
 		if !exists || fi.ModTime().After(fileState.ModTime) || fi.Size() != fileState.Size {
-			filesToIndex = append(filesToIndex, path)
+			filesToIndex = append(filesToIndex, absPath)
 			if exists {
-				filesToDelete = append(filesToDelete, path)
+				filesToDelete = append(filesToDelete, rel)
 			}
 		}
-		fileInfoMap[path] = fi
+		fileInfoMap[absPath] = fi
 	}
 
 	// Check for added or modified files (Docs)
-	var docsToIndex []string
-	var docsToDelete []string
+	var docsToIndex []string  // absolute
+	var docsToDelete []string // relative
 
-	for _, path := range currentDocs {
-		fi, err := os.Stat(path)
+	for _, absPath := range currentDocs {
+		fi, err := os.Stat(absPath)
 		if err != nil {
 			continue
 		}
 
-		fileState, exists := state.GetFileState(path)
+		rel := toRel(absPath)
+		fileState, exists := state.GetFileState(rel)
 		if !exists || fi.ModTime().After(fileState.ModTime) || fi.Size() != fileState.Size {
-			docsToIndex = append(docsToIndex, path)
+			docsToIndex = append(docsToIndex, absPath)
 			if exists {
-				docsToDelete = append(docsToDelete, path)
+				docsToDelete = append(docsToDelete, rel)
 			}
 		}
-		fileInfoMap[path] = fi
+		fileInfoMap[absPath] = fi
 	}
 
-	// Check for deleted files (both code and docs)
-	// We scan the state and check if files still exist in current scan
-	// But scan only has current files.
-	// Better: iterate state.Files and check if they exist on disk.
+	// Check for deleted files — state has relative paths, check if they still exist on disk
 	state.mu.RLock()
-	for path := range state.Files {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			// It's deleted. Determine if it was code or doc based on extension
-			ext := strings.ToLower(filepath.Ext(path))
+	for relPath := range state.Files {
+		absPath := toAbs(relPath)
+		if _, err := os.Stat(absPath); os.IsNotExist(err) {
+			ext := strings.ToLower(filepath.Ext(relPath))
 			if ext == ".md" {
-				docsToDelete = append(docsToDelete, path)
+				docsToDelete = append(docsToDelete, relPath)
 			} else {
-				filesToDelete = append(filesToDelete, path)
+				filesToDelete = append(filesToDelete, relPath)
 			}
 		}
 	}
 	state.mu.RUnlock()
 
-	// Process deletions (Code)
+	// Process deletions (Code) — relative paths for Qdrant metadata["file"] and state
 	if len(filesToDelete) > 0 {
 		log.Printf("🗑️  Deleting %d modified/deleted code files from index...", len(filesToDelete))
-		for _, path := range filesToDelete {
-			if err := ltm.DeleteByMetadata(ctx, "file", path); err != nil {
-				log.Printf("⚠️  Failed to delete chunks for %s: %v", path, err)
+		for _, rel := range filesToDelete {
+			if err := ltm.DeleteByMetadata(ctx, "file", rel); err != nil {
+				log.Printf("⚠️  Failed to delete chunks for %s: %v", rel, err)
 			}
-			state.RemoveFile(path)
+			state.RemoveFile(rel)
 		}
 	}
 
 	// Process deletions (Docs)
 	if len(docsToDelete) > 0 {
 		log.Printf("🗑️  Deleting %d modified/deleted doc files from index...", len(docsToDelete))
-		for _, path := range docsToDelete {
-			if err := ltm.DeleteByMetadata(ctx, "file", path); err != nil {
-				log.Printf("⚠️  Failed to delete chunks for %s: %v", path, err)
+		for _, rel := range docsToDelete {
+			if err := ltm.DeleteByMetadata(ctx, "file", rel); err != nil {
+				log.Printf("⚠️  Failed to delete chunks for %s: %v", rel, err)
 			}
-			state.RemoveFile(path)
+			state.RemoveFile(rel)
 		}
 	}
 
@@ -766,11 +843,14 @@ func (m *Manager) IndexLanguage(ctx context.Context, info *Info, language string
 		}
 
 		indexer := ragcode.NewIndexer(analyzer, m.llm, ltm)
+		indexer.WorkspaceRoot = info.Root // store relative paths in Qdrant metadata
 
 		// Save state incrementally as each file completes — survives Ctrl+C
+		// filePath from indexer is absolute; convert to relative for state
 		indexer.SetOnFileIndexed(func(filePath string) {
+			rel := toRel(filePath)
 			if fi, ok := fileInfoMap[filePath]; ok {
-				state.UpdateFile(filePath, fi)
+				state.UpdateFile(rel, fi)
 			}
 			if err := state.Save(stateFile); err != nil {
 				log.Printf("⚠️  Failed to save incremental state: %v", err)
@@ -796,15 +876,15 @@ func (m *Manager) IndexLanguage(ctx context.Context, info *Info, language string
 	// Process indexing (Docs)
 	if len(docsToIndex) > 0 {
 		log.Printf("📚 Indexing %d new/modified doc files...", len(docsToIndex))
-		// We use indexMarkdownFiles but only for the changed list
-		numDocs := m.indexMarkdownFiles(ctx, docsToIndex, collectionName, ltm)
+		numDocs := m.indexMarkdownFiles(ctx, docsToIndex, collectionName, ltm, info.Root)
 		if numDocs > 0 {
 			log.Printf("   Docs chunks indexed: %d", numDocs)
 		}
-		// Update state for indexed docs
-		for _, path := range docsToIndex {
-			if fi, ok := fileInfoMap[path]; ok {
-				state.UpdateFile(path, fi)
+		// Update state for indexed docs (relative paths)
+		for _, absPath := range docsToIndex {
+			rel := toRel(absPath)
+			if fi, ok := fileInfoMap[absPath]; ok {
+				state.UpdateFile(rel, fi)
 			}
 		}
 	} else {
@@ -813,10 +893,11 @@ func (m *Manager) IndexLanguage(ctx context.Context, info *Info, language string
 		}
 	}
 
-	// Update state for files that were already indexed (unchanged files)
-	for _, path := range currentFiles {
-		if fi, ok := fileInfoMap[path]; ok {
-			state.UpdateFile(path, fi)
+	// Update state for files that were already indexed (unchanged files) — relative paths
+	for _, absPath := range currentFiles {
+		rel := toRel(absPath)
+		if fi, ok := fileInfoMap[absPath]; ok {
+			state.UpdateFile(rel, fi)
 		}
 	}
 
@@ -867,29 +948,30 @@ func (m *Manager) checkAndReindexIfNeeded(ctx context.Context, info *Info, langu
 	hasChanges := false
 
 	// Check for modifications or additions
-	for _, path := range currentFiles {
-		fileInfo, err := os.Stat(path)
+	// State stores relative paths; scan returns absolute paths.
+	for _, absPath := range currentFiles {
+		fileInfo, err := os.Stat(absPath)
 		if err != nil {
 			continue
 		}
 
-		fileState, exists := state.GetFileState(path)
+		rel, _ := filepath.Rel(info.Root, absPath)
+		fileState, exists := state.GetFileState(rel)
 		if !exists || fileInfo.ModTime().After(fileState.ModTime) || fileInfo.Size() != fileState.Size {
 			hasChanges = true
 			break
 		}
 	}
 
-	// Check for deletions (files in state but not in current scan)
+	// Check for deletions (files in state but not on disk)
 	if !hasChanges {
-		currentFileMap := make(map[string]bool)
-		for _, p := range currentFiles {
-			currentFileMap[p] = true
-		}
-
 		state.mu.RLock()
-		for path := range state.Files {
-			if _, err := os.Stat(path); os.IsNotExist(err) {
+		for rel := range state.Files {
+			absPath := rel
+			if !filepath.IsAbs(rel) {
+				absPath = filepath.Join(info.Root, rel)
+			}
+			if _, err := os.Stat(absPath); os.IsNotExist(err) {
 				hasChanges = true
 				break
 			}
@@ -906,17 +988,125 @@ func (m *Manager) checkAndReindexIfNeeded(ctx context.Context, info *Info, langu
 	}
 }
 
+// FreshnessReport describes the state of the index relative to current files on disk.
+type FreshnessReport struct {
+	Fresh        bool     `json:"fresh"`
+	IndexedFiles int      `json:"indexed_files"`
+	LastIndexed  string   `json:"last_indexed,omitempty"`
+	Added        []string `json:"added,omitempty"`
+	Modified     []string `json:"modified,omitempty"`
+	Deleted      []string `json:"deleted,omitempty"`
+}
+
+// CheckIndexFreshness compares state.json against current filesystem without triggering indexing.
+// index-all stores state.json per indexed directory (e.g. src/.ragcode/state.json, tests/.ragcode/state.json).
+// This method merges all states from index_include directories.
+func (m *Manager) CheckIndexFreshness(info *Info) (*FreshnessReport, error) {
+	// Collect state from all index_include dirs (same layout as index-all)
+	mergedState := NewWorkspaceState()
+	includes := m.getIndexIncludes()
+	if len(includes) == 0 {
+		includes = []string{"."} // fallback: check root
+	}
+
+	for _, inc := range includes {
+		dir := filepath.Join(info.Root, inc)
+		stateFile := filepath.Join(dir, ".ragcode", "state.json")
+		s, err := LoadState(stateFile)
+		if err != nil || s.FileCount() == 0 {
+			continue
+		}
+		// Merge files into combined state
+		for _, path := range s.AllFilePaths() {
+			fs, _ := s.GetFileState(path)
+			mergedState.Files[path] = fs
+		}
+		if s.LastIndexed.After(mergedState.LastIndexed) {
+			mergedState.LastIndexed = s.LastIndexed
+		}
+	}
+
+	if mergedState.FileCount() == 0 {
+		return &FreshnessReport{Fresh: false}, nil
+	}
+
+	// Scan current files on disk
+	scan, err := m.scanWorkspace(info)
+	if err != nil {
+		return nil, fmt.Errorf("scan workspace: %w", err)
+	}
+
+	// Collect all current files across all languages
+	currentFiles := make(map[string]bool)
+	for _, files := range scan.LanguageFiles {
+		for _, f := range files {
+			currentFiles[f] = true
+		}
+	}
+	for _, f := range scan.DocFiles {
+		currentFiles[f] = true
+	}
+
+	report := &FreshnessReport{
+		IndexedFiles: mergedState.FileCount(),
+		LastIndexed:  mergedState.LastIndexed.Format("2006-01-02 15:04:05"),
+	}
+
+	// Check added/modified
+	// State stores RELATIVE paths; scan returns ABSOLUTE paths.
+	for absPath := range currentFiles {
+		fi, err := os.Stat(absPath)
+		if err != nil {
+			continue
+		}
+		rel := relPath(info.Root, absPath)
+		fileState, exists := mergedState.GetFileState(rel)
+		if !exists {
+			report.Added = append(report.Added, rel)
+		} else if fi.ModTime().After(fileState.ModTime) || fi.Size() != fileState.Size {
+			report.Modified = append(report.Modified, rel)
+		}
+	}
+
+	// Check deleted — state has relative paths
+	for _, rel := range mergedState.AllFilePaths() {
+		absPath := rel
+		if !filepath.IsAbs(rel) {
+			absPath = filepath.Join(info.Root, rel)
+		}
+		if _, err := os.Stat(absPath); os.IsNotExist(err) {
+			report.Deleted = append(report.Deleted, rel)
+		}
+	}
+
+	report.Fresh = len(report.Added) == 0 && len(report.Modified) == 0 && len(report.Deleted) == 0
+	return report, nil
+}
+
+func relPath(base, path string) string {
+	r, err := filepath.Rel(base, path)
+	if err != nil {
+		return path
+	}
+	return r
+}
+
 // indexMarkdownFiles indexes provided markdown files (already discovered during scan)
-func (m *Manager) indexMarkdownFiles(ctx context.Context, markdownFiles []string, collectionName string, ltm memory.LongTermMemory) int {
+func (m *Manager) indexMarkdownFiles(ctx context.Context, markdownFiles []string, collectionName string, ltm memory.LongTermMemory, wsRoot ...string) int {
 	if len(markdownFiles) == 0 {
 		return 0
 	}
 
 	log.Printf("📚 Found %d markdown file(s), indexing documentation...", len(markdownFiles))
 
+	root := ""
+	if len(wsRoot) > 0 {
+		root = wsRoot[0]
+	}
+
 	totalChunks := 0
 	for _, path := range markdownFiles {
-		chunks, err := m.indexMarkdownFile(ctx, path, collectionName, ltm)
+		chunks, err := m.indexMarkdownFile(ctx, path, collectionName, ltm, root)
 		if err != nil {
 			log.Printf("⚠️  Failed to index markdown file %s: %v", path, err)
 			continue
@@ -928,7 +1118,14 @@ func (m *Manager) indexMarkdownFiles(ctx context.Context, markdownFiles []string
 }
 
 // indexMarkdownFile chunks and indexes a single markdown file
-func (m *Manager) indexMarkdownFile(ctx context.Context, path string, collectionName string, ltm memory.LongTermMemory) (int, error) {
+func (m *Manager) indexMarkdownFile(ctx context.Context, path string, collectionName string, ltm memory.LongTermMemory, wsRoot ...string) (int, error) {
+	// Compute relative file path for metadata
+	metaFile := path
+	if len(wsRoot) > 0 && wsRoot[0] != "" {
+		if r, err := filepath.Rel(wsRoot[0], path); err == nil {
+			metaFile = r
+		}
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, fmt.Errorf("open %s: %w", path, err)
@@ -1021,7 +1218,7 @@ func (m *Manager) indexMarkdownFile(ctx context.Context, path string, collection
 		}
 
 		h := fnv.New64a()
-		h.Write([]byte(fmt.Sprintf("%s#%d", path, i)))
+		h.Write([]byte(fmt.Sprintf("%s#%d", metaFile, i)))
 		id := fmt.Sprintf("%d", h.Sum64())
 
 		doc := memory.Document{
@@ -1029,7 +1226,7 @@ func (m *Manager) indexMarkdownFile(ctx context.Context, path string, collection
 			Content:   text,
 			Embedding: emb,
 			Metadata: map[string]interface{}{
-				"file":       path,
+				"file":       metaFile,
 				"chunk_id":   i,
 				"source":     collectionName,
 				"chunk_type": "markdown",

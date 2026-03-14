@@ -379,6 +379,12 @@ func generateWorkspaceID(rootPath string) string {
 	return hex.EncodeToString(h[:])[:12]
 }
 
+// GenerateID is the exported version of generateWorkspaceID.
+// Creates a stable 12-char hex ID from workspace root path.
+func GenerateID(rootPath string) string {
+	return generateWorkspaceID(rootPath)
+}
+
 // inferProjectType determines project type from marker
 func inferProjectType(marker string) string {
 	switch marker {

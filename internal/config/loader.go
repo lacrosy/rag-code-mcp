@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +50,12 @@ func Load(path string) (*Config, error) {
 	// Validate configuration
 	if err := validate(&cfg); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	// Store the config file directory for resolving relative paths
+	absPath, err := filepath.Abs(path)
+	if err == nil {
+		cfg.ConfigDir = filepath.Dir(absPath)
 	}
 
 	return &cfg, nil
@@ -247,35 +254,63 @@ func applyEnvOverrides(cfg *Config) {
 	}
 }
 
-// migrateEmbeddingModel automatically migrates from old unstable embedding model
+// migrateEmbeddingModel automatically migrates from old unstable embedding model.
+// NOTE: nomic-embed-text is no longer considered deprecated — it is a valid choice
+// with 8K context and 768 dimensions. Auto-migration is disabled.
 func migrateEmbeddingModel(cfg *Config) bool {
-	migrated := false
+	// No auto-migration needed currently.
+	// Users choose their embedding model explicitly in config.yaml.
+	return false
+}
 
-	// List of deprecated/unstable models that should be migrated
-	deprecatedModels := []string{"nomic-embed-text"}
-	newStableModel := "mxbai-embed-large"
-
-	// Check if current model is deprecated
-	for _, deprecated := range deprecatedModels {
-		if cfg.LLM.OllamaEmbed == deprecated {
-			log.Printf("⚠️  MIGRATION: Detected deprecated embedding model '%s'", deprecated)
-			log.Printf("   Automatically upgrading to stable model '%s'", newStableModel)
-			log.Printf("   Note: Existing indexed data will need to be re-indexed.")
-			log.Printf("   Use 'index_workspace' tool with 'recreate: true' to rebuild indexes.")
-
-			cfg.LLM.OllamaEmbed = newStableModel
-			migrated = true
-			break
+// ResolveWorkspaceRoot returns the absolute path of the workspace root.
+// If workspace_root is set in config, resolves it relative to ConfigDir.
+// Returns empty string if workspace_root is not configured.
+func (cfg *Config) ResolveWorkspaceRoot() string {
+	wsRoot := cfg.Workspace.WorkspaceRoot
+	if wsRoot == "" {
+		return ""
+	}
+	if filepath.IsAbs(wsRoot) {
+		return filepath.Clean(wsRoot)
+	}
+	if cfg.ConfigDir == "" {
+		// Fallback: resolve relative to CWD
+		abs, err := filepath.Abs(wsRoot)
+		if err != nil {
+			return wsRoot
 		}
+		return abs
+	}
+	return filepath.Clean(filepath.Join(cfg.ConfigDir, wsRoot))
+}
 
-		// Also check legacy field
-		if cfg.LLM.EmbedModel == deprecated {
-			cfg.LLM.EmbedModel = newStableModel
-			migrated = true
+// FindConfigFile looks for config.yaml in standard locations:
+// 1. Explicit path (if provided and not empty)
+// 2. Next to the running binary (config.yaml must be in the same directory)
+// 3. Current working directory
+// Returns the path to the first config file found, or empty string.
+func FindConfigFile(explicit string) string {
+	if explicit != "" {
+		if _, err := os.Stat(explicit); err == nil {
+			return explicit
 		}
 	}
 
-	return migrated
+	// Look next to the binary
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), "config.yaml")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	// Look in CWD
+	if _, err := os.Stat("config.yaml"); err == nil {
+		return "config.yaml"
+	}
+
+	return explicit // fallback to whatever was passed
 }
 
 // validate checks if the configuration is valid

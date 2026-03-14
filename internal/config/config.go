@@ -34,6 +34,10 @@ type Config struct {
 
 	// Workspace configuration (multi-workspace support)
 	Workspace WorkspaceConfig `yaml:"workspace"`
+
+	// ConfigDir is the directory containing config.yaml (set at load time, not serialized).
+	// Used to resolve relative paths (workspace_root, php_extractors_dir, etc.).
+	ConfigDir string `yaml:"-"`
 }
 
 // LLMConfig contains LLM provider settings
@@ -159,6 +163,22 @@ type WorkspaceConfig struct {
 	// When false, uses traditional single-collection mode
 	Enabled bool `yaml:"enabled"`
 
+	// WorkspaceRoot is the project root directory.
+	// Resolved relative to config.yaml location (ConfigDir).
+	// Examples: "." = same dir as config.yaml, "../.." = two levels up.
+	// When set, disables automatic workspace detection entirely.
+	WorkspaceRoot string `yaml:"workspace_root"`
+
+	// EmbeddingDim is the vector dimension for Qdrant collections.
+	// Must match the output dimension of the embedding model.
+	// Examples: 1024 (mxbai-embed-large), 768 (nomic-embed-text)
+	// Default: 1024
+	EmbeddingDim int `yaml:"embedding_dim"`
+
+	// PHPBridgeURL is the URL of the PHP bridge service for parsing PHP files.
+	// Example: "http://localhost:9100"
+	PHPBridgeURL string `yaml:"php_bridge_url"`
+
 	// AutoIndex controls whether indexing is triggered automatically
 	// when a new workspace is detected
 	AutoIndex bool `yaml:"auto_index"`
@@ -208,4 +228,10 @@ type WorkspaceConfig struct {
 	// project-specific metadata. Path is relative to workspace root.
 	// Example: "ragcode/extractors"
 	PHPExtractorsDir string `yaml:"php_extractors_dir"`
+
+	// IndexLanguages specifies which programming languages to index.
+	// Only files matching these languages will be scanned and indexed.
+	// Empty = index all supported languages (go, php, python, html).
+	// Example: ["php"] = only index PHP files.
+	IndexLanguages []string `yaml:"index_languages"`
 }

@@ -98,3 +98,21 @@ func (s *WorkspaceState) GetFileState(path string) (FileState, bool) {
 	state, ok := s.Files[path]
 	return state, ok
 }
+
+// FileCount returns the number of tracked files
+func (s *WorkspaceState) FileCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.Files)
+}
+
+// AllFilePaths returns a copy of all tracked file paths
+func (s *WorkspaceState) AllFilePaths() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	paths := make([]string, 0, len(s.Files))
+	for p := range s.Files {
+		paths = append(paths, p)
+	}
+	return paths
+}
