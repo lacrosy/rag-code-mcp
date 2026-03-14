@@ -108,8 +108,8 @@ func main() {
 	// 2. Install PHP bridge → dir/php-bridge/
 	installPHPBridge(dir)
 
-	// 3. Create default config → dir/config.yaml
-	installConfig(dir)
+	// 3. Create default config → dir/bin/config.yaml (next to binaries for auto-discovery)
+	installConfig(filepath.Join(dir, "bin"))
 
 	// 4. Setup services (Docker containers)
 	setupServices()
@@ -577,9 +577,6 @@ func configureIDEs(dir string, selected []string) {
 	if runtime.GOOS == "windows" {
 		binPath += ".exe"
 	}
-	configPath := filepath.Join(dir, "config.yaml")
-	bridgePath := filepath.Join(dir, "php-bridge", "parse.php")
-
 	paths := resolveIDEPaths(home)
 	selection := normalizeIdeSelection(selected)
 
@@ -596,7 +593,7 @@ func configureIDEs(dir string, selected []string) {
 		} else {
 			_ = os.MkdirAll(cfgDir, 0755)
 		}
-		updateMCPConfig(key, cfg.displayName, cfg.path, binPath, configPath, bridgePath)
+		updateMCPConfig(key, cfg.displayName, cfg.path, binPath)
 	}
 }
 
@@ -691,7 +688,7 @@ func normalizeIdeSelection(selected []string) ideSelection {
 	return sel
 }
 
-func updateMCPConfig(ideKey, displayName, path, binPath, configPath, bridgePath string) {
+func updateMCPConfig(ideKey, displayName, path, binPath string) {
 	config := make(map[string]interface{})
 	if data, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(data, &config)
@@ -714,10 +711,7 @@ func updateMCPConfig(ideKey, displayName, path, binPath, configPath, bridgePath 
 
 	entry := map[string]interface{}{
 		"command": binPath,
-		"args":    []string{"-config", configPath},
-		"env": map[string]string{
-			"RAGCODE_PHP_BRIDGE_URL": "http://localhost:9100",
-		},
+		"args":    []string{"-quiet"},
 	}
 
 	if ideKey == "vs-code" || ideKey == "copilot" {
@@ -940,7 +934,7 @@ func printBanner() {
 
 func printSummary(dir string) {
 	binPath := filepath.Join(dir, "bin", "rag-code-mcp")
-	configPath := filepath.Join(dir, "config.yaml")
+	configPath := filepath.Join(dir, "bin", "config.yaml")
 
 	fmt.Printf("\n%sInstallation Complete!%s\n", green, reset)
 	fmt.Println("────────────────────────────────────────────")
@@ -953,11 +947,10 @@ func printSummary(dir string) {
 	fmt.Printf(`  {
     "ragcode": {
       "command": "%s",
-      "args": ["-config", "%s"],
-      "env": { "RAGCODE_PHP_BRIDGE_URL": "http://localhost:9100" }
+      "args": ["-quiet"]
     }
   }
-`, binPath, configPath)
+`, binPath)
 	fmt.Println()
 	fmt.Println("Next: open your IDE and ask AI to index_workspace.")
 }
